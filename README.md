@@ -257,7 +257,42 @@ pip install -r requirements.txt
 
 ---
 
-## 🔌 API & Integration
+## 🗑️ Uninstall
+
+### macOS Apple Silicon
+
+```bash
+# 1. Remove Conda environment
+conda deactivate
+conda remove -n deepseek-ocr --all
+
+# 2. Uninstall Python packages (if installed in system Python)
+pip uninstall torch torchvision torchaudio accelerate -y
+pip uninstall -r requirements-mac.txt -y
+
+# 3. Clear Node.js frontend build
+cd frontend
+rm -rf node_modules
+rm -rf dist
+cd ..
+
+# 4. Delete cloned repository
+cd ..
+rm -rf DeepSeek-OCR-WebUI
+
+# 5. Clear Hugging Face cache (optional, ~6.7 GB model weights)
+rm -rf ~/.cache/huggingface/hub/models--deepseek*                                       
+```
+
+✅ **After these steps:**
+- No `deepseek-ocr` conda environment remains
+- No Python packages from the project remain
+- No Node.js frontend build remains
+- No cached model weights remain (if you cleared Hugging Face cache)
+
+---
+
+## �🔌 API & Integration
 
 ### REST API
 
