@@ -216,6 +216,9 @@ docker run -d \
 ### 🍎 Mac (Apple Silicon)
 
 ```bash
+# Make sure Conda (or Miniconda is installed first)
+# make sure Node is also installed first
+
 # Clone and setup
 git clone https://github.com/neosun100/DeepSeek-OCR-WebUI.git
 cd DeepSeek-OCR-WebUI
@@ -226,6 +229,17 @@ conda activate deepseek-ocr
 
 # Install dependencies
 pip install -r requirements-mac.txt
+conda install pytorch torchvision torchaudio -c pytorch-nightly
+pip install "accelerate>=0.26.0"
+
+# To resolve Error 500 on Webui where pytorch needs MPS fallback
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+
+# Build the Web UI next
+cd frontend/
+npm i
+npm build
+cd ..
 
 # Start service
 ./start.sh
