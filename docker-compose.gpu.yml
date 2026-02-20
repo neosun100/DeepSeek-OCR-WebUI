@@ -16,6 +16,10 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - GPU_IDLE_TIMEOUT=${GPU_IDLE_TIMEOUT:-60}
       - PYTHONUNBUFFERED=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:128}
+      - OCR_BASE_SIZE=${OCR_BASE_SIZE:-768}
+      - OCR_IMAGE_SIZE=${OCR_IMAGE_SIZE:-448}
+      - OCR_CROP_MODE=${OCR_CROP_MODE:-true}
     
     volumes:
       - ./models:/root/.cache/huggingface
@@ -23,7 +27,14 @@ services:
     
     shm_size: "8g"
     restart: unless-stopped
-    
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]    
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
@@ -33,10 +44,5 @@ services:
     
     mem_limit: 32g
     memswap_limit: 32g
-    
-    networks:
-      - ocr-network
 
-networks:
-  ocr-network:
-    driver: bridge
+    network_mode: bridge
