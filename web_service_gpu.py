@@ -230,19 +230,19 @@ async def ocr_endpoint(
         
         # 步骤1: 懒加载模型
         if gpu_manager:
-            model, processor = gpu_manager.get_model(load_func=load_model_func)
+            model, tokenizer = gpu_manager.get_model(load_func=load_model_func)
         else:
             # CPU 模式
             from backends.cpu_backend import CPUBackend
             backend = CPUBackend()
             backend.load_model()
-            model, processor = backend.model, backend.processor
+            model, tokenizer = backend.model, backend.tokenizer
         
         # 步骤2: 推理
         from backends.cuda_backend import CUDABackend
         backend = CUDABackend()
         backend.model = model
-        backend.processor = processor
+        backend.tokenizer = tokenizer
         text = backend.infer(prompt=prompt, image_path=tmp_file)
         
         # 步骤3: 立即卸载（关键！）
@@ -368,17 +368,17 @@ async def ocr_pdf_endpoint(
         
         # 获取模型（只加载一次）
         if gpu_manager:
-            model, processor = gpu_manager.get_model(load_func=load_model_func)
+            model, tokenizer = gpu_manager.get_model(load_func=load_model_func)
         else:
             from backends.cpu_backend import CPUBackend
             backend = CPUBackend()
             backend.load_model()
-            model, processor = backend.model, backend.processor
+            model, tokenizer = backend.model, backend.tokenizer
         
         from backends.cuda_backend import CUDABackend
         backend = CUDABackend()
         backend.model = model
-        backend.processor = processor
+        backend.tokenizer = tokenizer
         
         # 构建提示词
         prompt = build_prompt(prompt_type, custom_prompt, find_term)

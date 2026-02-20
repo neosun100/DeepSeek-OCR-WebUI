@@ -5,9 +5,9 @@ import torch
 
 # DeepSeek-OCR-2 default parameters (from official config)
 DEFAULT_MODEL_PATH = "deepseek-ai/DeepSeek-OCR-2"
-DEFAULT_BASE_SIZE = 1024
-DEFAULT_IMAGE_SIZE = 768
-DEFAULT_CROP_MODE = True
+DEFAULT_BASE_SIZE = int(os.environ.get("OCR_BASE_SIZE", "1024"))
+DEFAULT_IMAGE_SIZE = int(os.environ.get("OCR_IMAGE_SIZE", "768"))
+DEFAULT_CROP_MODE = os.environ.get("OCR_CROP_MODE", "true").strip().lower() in ("1", "true", "yes", "on")
 
 class CUDABackend:
     def __init__(self, model_path: str = DEFAULT_MODEL_PATH):
@@ -72,22 +72,55 @@ class CUDABackend:
     
     def infer(self, prompt: str, image_path: str, **kwargs) -> str:
         """Run inference on CUDA"""
-        try:
-            result = self.model.infer(
-                tokenizer=self.tokenizer,
-                prompt=prompt,
-                image_file=image_path,
-                output_path='./output',
-                base_size=DEFAULT_BASE_SIZE,
-                image_size=DEFAULT_IMAGE_SIZE,
-                crop_mode=DEFAULT_CROP_MODE,
-                save_results=False,
-                eval_mode=True
-            )
-            return result if result else ""
-        except Exception as e:
-            print(f"❌ Inference failed: {e}")
-            raise
+        fallback_profiles = [
+            (DEFAULT_BASE_SIZE, DEFAULT_IMAGE_SIZE, DEFAULT_CROP_MODE),
+            (DEFAULT_BASE_SIZE, DEFAULT_IMAGE_SIZE, True),
+            (640, 448, True),
+            (576, 384, True),
+            (512, 320, True),
+        ]
+        seen = set()
+        last_error = None
+
+        for base_size, image_size, crop_mode in fallback_profiles:
+            profile = (base_size, image_size, crop_mode)
+            if profile in seen:
+                continue
+            seen.add(profile)
+
+            try:
+                print(
+                    f"🧪 Inference profile: base_size={base_size}, image_size={image_size}, crop_mode={crop_mode}"
+                )
+                result = self.model.infer(
+                    tokenizer=self.tokenizer,
+                    prompt=prompt,
+                    image_file=image_path,
+                    output_path='./output',
+                    base_size=base_size,
+                    image_size=image_size,
+                    crop_mode=crop_mode,
+                    save_results=False,
+                    eval_mode=True
+                )
+                return result if result else ""
+            except Exception as e:
+                last_error = e
+                msg = str(e)
+                # Upstream OCR-2 bug path: param_img is undefined when crop_mode=False.
+                if "param_img" in msg and not crop_mode:
+                    print(f"⚠️ Upstream param_img bug with crop_mode={crop_mode}, retrying with crop_mode=True")
+                    continue
+                if isinstance(e, torch.OutOfMemoryError) or "out of memory" in msg.lower():
+                    print(f"⚠️ CUDA OOM with profile {profile}, trying smaller profile...")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    continue
+                print(f"❌ Inference failed: {e}")
+                raise
+
+        print(f"❌ Inference failed after all fallback profiles: {last_error}")
+        raise last_error
     
     @staticmethod
     def is_available() -> bool:
