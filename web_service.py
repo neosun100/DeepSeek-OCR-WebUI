@@ -23,6 +23,33 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 import uvicorn
 import fitz  # PyMuPDF
+#新增部分
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 你原来的模型加载逻辑……
+    yield
+
+app = FastAPI(
+    title="DeepSeek-OCR API",
+    version="3.0.0",
+    lifespan=lifespan,
+)
+
+# 1) 把 /app/static 目录挂载到 /static
+SWAGGER_UI_ROOT = "/app/static"
+app.mount("/static", StaticFiles(directory=SWAGGER_UI_ROOT), name="static")
+
+# 2) /docs 直接返回本地 index.html
+@app.get("/docs", include_in_schema=False, response_class=HTMLResponse)
+async def custom_docs():
+    f = os.path.join(SWAGGER_UI_ROOT, "index.html")
+    if not os.path.exists(f):
+        return HTMLResponse("index.html not found", status_code=404)
+    return HTMLResponse(open(f, "r", encoding="utf-8").read())
 
 # 全局变量
 model = None
@@ -199,12 +226,12 @@ async def lifespan(app: FastAPI):
     print("🛑 服务关闭中...")
 
 # FastAPI 应用
-app = FastAPI(
-    title="DeepSeek-OCR API - 增强版",
-    description="智能 OCR 识别服务 · Find & Freeform 支持",
-    version="3.0.0",
-    lifespan=lifespan
-)
+#app = FastAPI(
+#    title="DeepSeek-OCR API - 增强版",
+#    description="智能 OCR 识别服务 · Find & Freeform 支持",
+#    version="3.0.0",
+#    lifespan=lifespan
+#)
 
 # CORS 中间件
 app.add_middleware(
