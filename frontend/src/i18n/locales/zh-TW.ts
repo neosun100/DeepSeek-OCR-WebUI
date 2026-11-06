@@ -42,7 +42,16 @@ export default {
         fullTooltip: '隊列已滿 (無法提交)',
         queue: '隊列',
         busy: '繁忙',
-        full: '已滿'
+        full: '已滿',
+        starting: '模型載入中',
+        startingTooltip: '模型正在載入 / 預熱，新任務會排隊等待並自動開始。',
+        modelError: '模型不可用',
+        modelErrorDetail: '模型不可用：{0}',
+        unreachableTooltip: '無法連線 OCR 服務（網路錯誤或服務未啟動）。',
+        engine: '引擎',
+        device: '裝置',
+        dtype: '精度',
+        version: '版本'
     },
 
     // Header
@@ -213,7 +222,8 @@ export default {
     // Page Item
     pageItem: {
         scanToDocument: '掃描為文檔',
-        deletePage: '刪除頁面'
+        deletePage: '刪除頁面',
+        outputWarning: 'OCR 結果可能不可靠'
     },
 
     // OCR Queue Popover
@@ -228,7 +238,9 @@ export default {
         cancelTask: '取消任務',
         taskCancelled: '任務已取消',
         tasksCancelled: '已取消 {n} 個任務',
-        allTasksCancelled: '已取消所有任務'
+        allTasksCancelled: '已取消所有任務',
+        modelLoading: '模型載入中，排隊任務將在就緒後自動開始。',
+        modelError: '模型不可用：{0}'
     },
 
     // OCR Input Modal
@@ -247,7 +259,13 @@ export default {
         copy: '複製',
         noRawText: '無原始文本',
         copied: '已複製！',
-        copyFailed: '複製失敗'
+        copyFailed: '複製失敗',
+        warnings: '產物檢查',
+        finishReason: '結束原因',
+        finishStop: '正常結束',
+        finishLength: '達到最大長度（可能被截斷）',
+        finishRepetitionCut: '偵測到重複輸出，已提前停止',
+        hint: '提示'
     },
 
     // Error messages

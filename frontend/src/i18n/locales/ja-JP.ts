@@ -42,7 +42,16 @@ export default {
         fullTooltip: 'キュー満杯 (送信不可)',
         queue: 'キュー',
         busy: '混雑',
-        full: '満杯'
+        full: '満杯',
+        starting: 'モデル読み込み中',
+        startingTooltip: 'モデルを読み込み / ウォームアップ中です。新しいタスクはキューで待機し、自動的に開始されます。',
+        modelError: 'モデル利用不可',
+        modelErrorDetail: 'モデル利用不可：{0}',
+        unreachableTooltip: 'OCR サービスに接続できません（ネットワークエラーまたはサーバー停止）。',
+        engine: 'エンジン',
+        device: 'デバイス',
+        dtype: '精度',
+        version: 'バージョン'
     },
 
     // Header
@@ -212,7 +221,8 @@ export default {
     // Page Item
     pageItem: {
         scanToDocument: 'ドキュメントへスキャン',
-        deletePage: 'ページを削除'
+        deletePage: 'ページを削除',
+        outputWarning: 'OCR 結果が信頼できない可能性があります'
     },
 
     // OCR Queue Popover
@@ -227,7 +237,9 @@ export default {
         cancelTask: 'タスクをキャンセル',
         taskCancelled: 'タスクがキャンセルされました',
         tasksCancelled: '{n} 個のタスクがキャンセルされました',
-        allTasksCancelled: 'すべてのタスクがキャンセルされました'
+        allTasksCancelled: 'すべてのタスクがキャンセルされました',
+        modelLoading: 'モデル読み込み中です。準備ができ次第キューのタスクが開始されます。',
+        modelError: 'モデル利用不可：{0}'
     },
 
     // OCR Input Modal
@@ -246,7 +258,13 @@ export default {
         copy: 'コピー',
         noRawText: '生テキストがありません',
         copied: 'コピーしました！',
-        copyFailed: 'コピー失敗'
+        copyFailed: 'コピー失敗',
+        warnings: '出力チェック',
+        finishReason: '終了理由',
+        finishStop: '正常終了',
+        finishLength: '最大長に到達（切り捨ての可能性）',
+        finishRepetitionCut: '繰り返しを検出し早期停止',
+        hint: 'ヒント'
     },
 
     // Error messages
