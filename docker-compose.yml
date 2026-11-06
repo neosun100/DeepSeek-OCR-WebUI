@@ -1,0 +1,46 @@
+# DeepSeek-OCR-WebUI v5
+#   docker compose up -d            # vLLM 引擎（默认）
+#   docker compose --profile hf up -d deepseek-ocr-hf   # transformers 引擎
+# 打开 http://127.0.0.1:8001 · API 文档 http://127.0.0.1:8001/docs
+#
+# 🔒 端口只发布到 127.0.0.1：本服务没有登录鉴权，发布到所有接口 = 同网段任何人都能用你的 GPU、看你的文档。
+#    需要从别的机器访问：用 SSH 端口转发（ssh -L 8001:127.0.0.1:8001 user@gpu-host），
+#    或放在带鉴权的反向代理之后 —— 不要把这里改成 "8001:8001"。
+
+x-common: &common
+  restart: unless-stopped
+  shm_size: 8g
+  volumes:
+    - models:/models   # 权重缓存（首次启动下载约 6.8 GB）
+  environment:
+    - DSOCR_MAX_UPLOAD_MB=${DSOCR_MAX_UPLOAD_MB:-200}
+    - DSOCR_MAX_QUEUE=${DSOCR_MAX_QUEUE:-32}
+    - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  deepseek-ocr:
+    <<: *common
+    image: ghcr.io/neosun100/deepseek-ocr-webui:5.0.0
+    build: { context: ., target: vllm }
+    container_name: deepseek-ocr-webui
+    ports:
+      - "127.0.0.1:8001:8001"
+
+  deepseek-ocr-hf:
+    <<: *common
+    profiles: [hf]
+    image: ghcr.io/neosun100/deepseek-ocr-webui:5.0.0-hf
+    build: { context: ., target: hf }
+    container_name: deepseek-ocr-webui-hf
+    ports:
+      - "127.0.0.1:8001:8001"
+
+volumes:
+  models:
