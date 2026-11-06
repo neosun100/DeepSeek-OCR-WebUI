@@ -14,6 +14,8 @@
 #   P6 vLLM 与 HF 在同页集上的内容一致性（双向召回最小值）均值 ≥ 0.9
 # 判定码：DOCKER_PASS · DOCKER_FAIL:<Pn…> · DOCKER_BLOCKED:<原因>
 set -uo pipefail
+# 经 sudo -u / SSM 执行时 HOME 可能未设（set -u 下直接退出，2026-11-07 真机踩到）
+: "${HOME:=$(getent passwd "$(id -un)" | cut -d: -f6)}"; export HOME
 
 WORK="${WORK:-/opt/dsocr}"
 RES="$WORK/results"

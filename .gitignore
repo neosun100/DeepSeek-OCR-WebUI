@@ -42,3 +42,6 @@ Thumbs.db
 .idea/
 *.swp
 .omc/
+
+# Claude Code worktrees / 本地状态
+.claude/

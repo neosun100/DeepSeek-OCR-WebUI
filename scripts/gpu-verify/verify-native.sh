@@ -10,6 +10,8 @@
 #   N4 原生服务 E2E（tests/e2e/test_live.py）全过；端口只监听 127.0.0.1
 # 判定码：NATIVE_PASS · NATIVE_FAIL:<N…> · NATIVE_BLOCKED:<原因>
 set -uo pipefail
+# 经 sudo -u / SSM 执行时 HOME 可能未设（set -u 下直接退出，2026-11-07 真机踩到）
+: "${HOME:=$(getent passwd "$(id -un)" | cut -d: -f6)}"; export HOME
 WORK="${WORK:-/opt/dsocr}"; RES="$WORK/results"; mkdir -p "$RES"
 exec > >(tee -a "$RES/verify-native.log") 2>&1
 FAILS=(); note() { echo "[$(date +%H:%M:%S)] $*"; }; fail() { FAILS+=("$1"); note "❌ $1"; }
