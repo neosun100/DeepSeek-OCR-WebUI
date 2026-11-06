@@ -139,3 +139,16 @@ def test_no_env_secret_literals_in_deploy_files() -> None:
                 assert not re.search(r"(KEY|TOKEN|SECRET|PASSWORD)\s*[=:]\s*\S{6,}", line, re.I), (
                     f"{p}: {line}"
                 )
+
+
+def test_committed_openapi_is_current() -> None:
+    # API 文档是生成物：docs/openapi.json 必须与代码生成的一致（手写 API.md 在 v4 已静默过期）。
+    # 更新：DSOCR_ENGINE=fake uv run deepseek-ocr-webui openapi > docs/openapi.json
+    import json
+
+    from deepseek_ocr_webui.app import create_app
+    from deepseek_ocr_webui.config import Settings
+
+    committed = json.loads((ROOT / "docs" / "openapi.json").read_text())
+    current = create_app(Settings(engine="fake", log_level="WARNING")).openapi()
+    assert committed == json.loads(json.dumps(current)), "docs/openapi.json 过期：按上面的命令重新生成"
