@@ -195,6 +195,7 @@ vi.mock('./services/ocr/events', () => ({
 vi.mock('@/services/ocr', () => ({
   ocrService: {
     resumeBatchOCR: vi.fn(),
+    resumeOnVisible: vi.fn().mockResolvedValue({ resumed: 0, skipped: 0, missingImage: 0 }),
     queueOCR: vi.fn()
   }
 }))
@@ -270,6 +271,33 @@ describe('App.vue', () => {
     // Verify resumeBatchOCR called
     const { ocrService } = await import('@/services/ocr')
     expect(ocrService.resumeBatchOCR).toHaveBeenCalled()
+  })
+
+  it('resumes OCR when the tab becomes visible again (issue #47)', async () => {
+    const wrapper = mountApp()
+    await flushPromises()
+    const { ocrService } = await import('@/services/ocr')
+    const setVisibility = (v: string) =>
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v })
+
+    vi.mocked(ocrService.resumeOnVisible).mockClear()
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(ocrService.resumeOnVisible).not.toHaveBeenCalled()
+
+    // Other tests in this file leave their App instances mounted, so count deltas
+    const resume = vi.mocked(ocrService.resumeOnVisible)
+    setVisibility('visible')
+    let before = resume.mock.calls.length
+    document.dispatchEvent(new Event('visibilitychange'))
+    const listeners = resume.mock.calls.length - before
+    expect(listeners).toBeGreaterThanOrEqual(1)
+
+    // This instance's listener is removed on unmount
+    wrapper.unmount()
+    before = resume.mock.calls.length
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(resume.mock.calls.length - before).toBe(listeners - 1)
   })
 
   it('handles page selection correctly', async () => {

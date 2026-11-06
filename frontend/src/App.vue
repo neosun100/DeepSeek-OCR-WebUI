@@ -463,6 +463,17 @@ watch(() => pagesStore.pages, (newPages) => {
 // Store resume timer ID to clear it on unmount
 let resumeTimer: ReturnType<typeof setTimeout> | null = null
 
+/**
+ * Issue #47: background tabs get throttled/frozen and may drop the OCR request.
+ * When the tab is visible again, wake parked tasks, refresh health and re-queue orphaned pages.
+ */
+function handleVisibilityChange() {
+  if (document.visibilityState !== 'visible') return
+  ocrService.resumeOnVisible(pagesStore.pages).catch(error => {
+    uiLogger.error('Failed to resume OCR after tab became visible:', error)
+  })
+}
+
 // Load pages from database on mount and resume PDF processing
 onMounted(async () => {
   // Start health check
@@ -488,6 +499,8 @@ onMounted(async () => {
   // Initialize event listeners for OCR and Document Generation
   pagesStore.setupOCREventListeners()
   pagesStore.setupDocGenEventListeners()
+
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 
   // Add global error notifications for OCR and DocGen
   ocrEvents.on('ocr:error', ({ pageId, error }) => {
@@ -542,6 +555,8 @@ onBeforeUnmount(() => {
     clearTimeout(resumeTimer)
   }
   
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+
   // Clear queues (note: this won't fire on page refresh, see beforeunload listener above)
   queueManager.clear()
 })
