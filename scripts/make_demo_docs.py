@@ -49,7 +49,8 @@ PAGE2 = [
 STYLE = {"title": 20, "h2": 14, "p": 10.5, "li": 10.5}
 
 
-_CJK = pymupdf.Font("cjk")  # PyMuPDF 自带 Droid Sans Fallback：拉丁字母是比例宽度（china-s 是全角，英文排不开）
+# PyMuPDF 自带 Droid Sans Fallback：拉丁字母是比例宽度（china-s 是全角，英文排不开）
+_CJK = pymupdf.Font("cjk")
 
 
 def _register(page: pymupdf.Page) -> None:
@@ -96,10 +97,21 @@ def main() -> None:
     p2 = doc.new_page(width=595, height=842)
     _register(p2)
     _flow(p2, PAGE2, 60)
-    doc.set_metadata({"title": "DeepSeek-OCR-WebUI demo report", "author": "DeepSeek-OCR-WebUI"})
+    # 固定时间戳 + 不写随机文档 ID ⇒ 同一份代码生成的字节完全相同（重跑不产生 git diff）
+    fixed = "D:20261107000000Z"
+    doc.set_metadata(
+        {
+            "title": "DeepSeek-OCR-WebUI demo report",
+            "author": "DeepSeek-OCR-WebUI",
+            "creationDate": fixed,
+            "modDate": fixed,
+            "producer": "DeepSeek-OCR-WebUI",
+            "creator": "make_demo_docs.py",
+        }
+    )
     path = OUT / "demo-report.pdf"
     doc.subset_fonts()  # 只嵌入用到的字形：1.7 MB → 几十 KB
-    doc.save(path, garbage=4, deflate=True)
+    doc.save(path, garbage=4, deflate=True, no_new_id=True)
     doc.close()
     print(path)
 
