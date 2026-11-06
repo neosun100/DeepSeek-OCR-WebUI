@@ -35,7 +35,7 @@ test.describe('Order Integrity (Mixed Files)', () => {
     const names = await pageList.getPageOrder();
     expect(names[0]).toBe('sample.png');
     for (let i = 1; i < names.length; i++) {
-      expect(names[i]).toMatch(/sample_\d+\.png/);
+      expect(names[i]).toMatch(/sample_\d+\.jpg/);
     }
   });
 
@@ -77,7 +77,7 @@ test.describe('Order Integrity (Mixed Files)', () => {
     // 5. Verify Final Order
     const names = await pageList.getPageOrder();
     for (let i = 0; i < pdfPageCount; i++) {
-      expect(names[i]).toMatch(/sample_\d+\.png/);
+      expect(names[i]).toMatch(/sample_\d+\.jpg/);
     }
     expect(names[pdfPageCount]).toBe('sample.png');
   });
@@ -175,7 +175,7 @@ test.describe('Order Integrity (Mixed Files)', () => {
     // Verify consistency
     const names = await pageList.getPageOrder();
     expect(names.some(n => n.includes('sample.png'))).toBe(true);
-    const pdfPageNames = names.filter(n => /^sample_\d+\.png$/.test(n));
+    const pdfPageNames = names.filter(n => /^sample_\d+\.jpg$/.test(n));
     expect(pdfPageNames.length).toBe(totalCount - 1);
   });
 });

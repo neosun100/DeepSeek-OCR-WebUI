@@ -6,8 +6,10 @@ import {
   getQueueStats,
   pauseQueue,
   resumeQueue,
-  clearQueue
+  clearQueue,
+  pdfSourceCache
 } from '@/services/pdf/pdfQueue'
+import { PAGE_RENDER_CONFIG } from '@/services/pdf/config'
 import { db } from '@/db/index'
 import { pdfEvents } from '@/services/pdf/events'
 import { queueLogger } from '@/utils/logger'
@@ -35,8 +37,7 @@ vi.mock('@/services/pdf/events', () => ({
 
 vi.mock('@/services/pdf/enhancedPdfRenderer', () => ({
   enhancedPdfRenderer: {
-    getOptimalFallbackFont: vi.fn().mockResolvedValue('sans-serif'),
-    destroyDocument: vi.fn()
+    pickFallbackFont: vi.fn().mockReturnValue('sans-serif')
   }
 }))
 
@@ -68,14 +69,33 @@ vi.mock('p-queue', () => {
 let mockWorkerResponseCallback: ((worker: unknown, data: unknown) => void) | undefined
 let mockWorkerLastMessage: unknown
 let lastWorkerInstance: Worker | null = null
+// All messages posted to the worker, with their transfer lists
+let workerMessages: { data: any; transfer: unknown[] }[] = []
+// What the fake worker answers to 'open': page count or an error message
+let mockOpenReply: { numPages: number; sampleText?: string } | { error: string } = { numPages: 1 }
 
 class MockWorker {
   onmessage: ((ev: MessageEvent) => unknown) | null = null
   onerror: ((this: Worker, ev: ErrorEvent) => unknown) | null = null
   listeners: Record<string, unknown[]> = {}
   constructor() { lastWorkerInstance = this as unknown as Worker }
-  postMessage(data: unknown) {
+  postMessage(data: unknown, transfer: unknown[] = []) {
     mockWorkerLastMessage = data
+    workerMessages.push({ data, transfer })
+    const msg = data as { type: string; payload: { docId: string } }
+    if (msg.type === 'open') {
+      // Simulate the real transfer: the sender's buffer is detached
+      structuredClone(data, { transfer } as Parameters<typeof structuredClone>[1])
+      const reply = 'error' in mockOpenReply
+        ? { type: 'open-error', payload: { docId: msg.payload.docId, error: mockOpenReply.error } }
+        : { type: 'opened', payload: { docId: msg.payload.docId, ...mockOpenReply } }
+      setTimeout(() => this.trigger('message', { data: reply }), 0)
+      return
+    }
+    if (msg.type === 'close') {
+      setTimeout(() => this.trigger('message', { data: { type: 'closed', payload: { docId: msg.payload.docId } } }), 0)
+      return
+    }
     setTimeout(() => { if (mockWorkerResponseCallback) mockWorkerResponseCallback(this, data) }, 0)
   }
   addEventListener(type: string, listener: (event: unknown) => void) {
@@ -112,7 +132,8 @@ describe('pdfQueue', () => {
   it('queuePDFPages: should create pages and add to queue', async () => {
     const { file, pdfData } = getTestData()
     vi.mocked(db.savePage).mockResolvedValue('page-id-1')
-    await queuePDFPages(file, pdfData, 2, 'file-id-1')
+    mockOpenReply = { numPages: 2 }
+    await queuePDFPages(file, pdfData, 'file-id-1')
     expect(db.savePagesBatch).toHaveBeenCalled()
     await new Promise(res => setTimeout(res, 50))
     expect(pdfEvents.emit).toHaveBeenCalledWith('pdf:processing-start', expect.anything())
@@ -137,7 +158,8 @@ describe('pdfQueue', () => {
       }
     }
 
-    await queuePDFPages(file, pdfData, 1, 'file-id-1')
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(file, pdfData, 'file-id-1')
     await new Promise(res => setTimeout(res, 50))
     expect(db.savePageImage).toHaveBeenCalled()
     expect(db.savePage).toHaveBeenCalledWith(expect.objectContaining({ status: 'ready' }))
@@ -160,7 +182,8 @@ describe('pdfQueue', () => {
       }
     }
 
-    await queuePDFPages(file, pdfData, 1, 'file-id-err')
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(file, pdfData, 'file-id-err')
     await new Promise(res => setTimeout(res, 50))
     expect(pdfEvents.emit).toHaveBeenCalledWith('pdf:page:error', expect.anything())
     expect(db.savePage).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }))
@@ -257,10 +280,12 @@ describe('pdfQueue', () => {
     expect(queueLogger.info).not.toHaveBeenCalledWith(expect.stringContaining('Found'))
   })
 
-  it('queue: should handle errors in queuePDFPages', async () => {
+  it('queue: DB failure after open closes the document again and rethrows', async () => {
     vi.mocked(db.savePagesBatch).mockRejectedValue(new Error('Order failed'))
-    await queuePDFPages(new File([], 'f.pdf'), new ArrayBuffer(0), 1)
+    await expect(queuePDFPages(new File([], 'f.pdf'), new ArrayBuffer(10), 'f-db')).rejects.toThrow('Order failed')
     expect(queueLogger.error).toHaveBeenCalledWith(expect.stringContaining('Error queueing'), expect.anything())
+    expect(workerMessages.map(m => m.data.type)).toEqual(['open', 'close'])
+    expect(workerMessages[1]!.data.payload.docId).toBe('f-db')
   })
 
   it('global: should handle error in updateOverallProgress', async () => {
@@ -370,9 +395,9 @@ describe('pdfQueue', () => {
 
     const pdfQueueModule = await import('@/services/pdf/pdfQueue')
     pdfQueueModule.pdfSourceCache.set('src_mock_missing', {
-      data: new ArrayBuffer(0),
       totalPages: 1,
-      processedCount: 0
+      processedCount: 0,
+      fallbackFont: 'sans-serif'
     })
 
     mockWorkerResponseCallback = (worker, _) => {
@@ -411,7 +436,8 @@ describe('pdfQueue', () => {
       // @ts-expect-error: accessing private/protected property for testing
       worker.onmessage({ data: { pageId: 'p-thumb-fail', imageBlob: new Blob() } })
     }
-    await queuePDFPages(file, pdfData, 1, 'f1')
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(file, pdfData, 'f1')
     await new Promise(res => setTimeout(res, 100))
     expect(queueLogger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to generate thumbnail'), expect.anything())
     globalThis.Image = OriginalImage
@@ -430,7 +456,8 @@ describe('pdfQueue', () => {
       // @ts-expect-error: accessing private/protected property for testing
       worker.onmessage({ data: { pageId: 'p1', imageBlob: new Blob() } })
     }
-    await queuePDFPages(file, pdfData, 1, 'f1')
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(file, pdfData, 'f1')
     await new Promise(res => setTimeout(res, 100))
     expect(db.deleteFile).toHaveBeenCalledWith('f1')
     expect(pdfEvents.emit).toHaveBeenCalledWith('pdf:processing-complete', expect.anything())
@@ -458,6 +485,184 @@ describe('pdfQueue', () => {
   })
 })
 
+describe('pdfQueue: single parse, transfer once, backpressure', () => {
+  const successFor = (pageId: string) => ({
+    data: { pageId, imageBlob: new Blob(['img']), width: 100, height: 100, pageNumber: 1, fileSize: 3 }
+  })
+  const renderMessages = () => workerMessages.filter(m => m.data.type === 'render')
+  const settle = () => new Promise(res => setTimeout(res, 20))
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (globalThis as any).pageIdCounter = 0
+    setupDefaultDbMocks()
+    setupGlobalMocks()
+    vi.mocked(db.savePagesBatch).mockImplementation(async (pages: any[]) => pages.map(p => p.id))
+  })
+
+  afterEach(() => {
+    globalThis.Worker = originalWorker
+    globalThis.URL = originalURL
+    globalThis.Image = originalImage
+    clearQueue()
+  })
+
+  it('transfers the PDF bytes exactly once and never copies them', async () => {
+    const sliceSpy = vi.spyOn(ArrayBuffer.prototype, 'slice')
+    const pdfData = new ArrayBuffer(4096)
+    mockOpenReply = { numPages: 3 }
+
+    const count = await queuePDFPages(new File([''], 'doc.pdf'), pdfData, 'f-transfer')
+    await settle()
+
+    expect(count).toBe(3)
+    const withBytes = workerMessages.filter(m => m.data.payload?.pdfData)
+    expect(withBytes).toHaveLength(1)
+    expect(withBytes[0]!.data.type).toBe('open')
+    expect(withBytes[0]!.transfer).toEqual([pdfData])
+    // Transferred => detached on the main thread
+    expect(pdfData.byteLength).toBe(0)
+    expect(sliceSpy).not.toHaveBeenCalled()
+    // Render requests refer to the open document by id only
+    for (const m of renderMessages()) {
+      expect(m.data.payload.pdfData).toBeUndefined()
+      expect(m.data.payload.docId).toBe('f-transfer')
+    }
+    sliceSpy.mockRestore()
+  })
+
+  it('creates JPEG-named pages and requests the configured format/size', async () => {
+    mockOpenReply = { numPages: 2 }
+    await queuePDFPages(new File([''], 'Book.pdf'), new ArrayBuffer(8), 'f-names')
+    await settle()
+
+    const pages = vi.mocked(db.savePagesBatch).mock.calls[0]![0] as any[]
+    expect(pages.map(p => p.fileName)).toEqual(['Book_1.jpg', 'Book_2.jpg'])
+    expect(pages.every(p => p.fileType === 'image/jpeg')).toBe(true)
+    expect(renderMessages()[0]!.data.payload).toEqual(expect.objectContaining({
+      imageFormat: 'jpeg',
+      quality: PAGE_RENDER_CONFIG.quality,
+      targetLongEdgePx: PAGE_RENDER_CONFIG.targetLongEdgePx,
+      fallbackFontFamily: 'sans-serif'
+    }))
+  })
+
+  it('rejects (and stores nothing) when the worker cannot open the PDF', async () => {
+    mockOpenReply = { error: 'Invalid PDF structure' }
+    await expect(queuePDFPages(new File([''], 'bad.pdf'), new ArrayBuffer(8), 'f-bad')).rejects.toThrow('Invalid PDF structure')
+    expect(db.savePagesBatch).not.toHaveBeenCalled()
+    expect(pdfSourceCache.has('f-bad')).toBe(false)
+  })
+
+  it('rejects a document with zero pages and closes it', async () => {
+    mockOpenReply = { numPages: 0 }
+    await expect(queuePDFPages(new File([''], 'empty.pdf'), new ArrayBuffer(8), 'f-empty')).rejects.toThrow('empty or corrupted')
+    expect(workerMessages.map(m => m.data.type)).toEqual(['open', 'close'])
+  })
+
+  it('a queue task stays pending until the worker answers (one page in flight)', async () => {
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(new File([''], 'doc.pdf'), new ArrayBuffer(8), 'f-bp')
+    await settle()
+
+    expect(renderMessages()).toHaveLength(1)
+    expect(getQueueStats().pending).toBe(1)
+
+    ;(lastWorkerInstance as any).trigger('message', successFor(renderMessages()[0]!.data.payload.pageId))
+    await vi.waitFor(() => expect(getQueueStats().pending).toBe(0))
+  })
+
+  it('closes the worker document after the last page of a source is done', async () => {
+    mockOpenReply = { numPages: 2 }
+    await queuePDFPages(new File([''], 'doc.pdf'), new ArrayBuffer(8), 'f-done')
+    await settle()
+
+    for (const m of renderMessages()) {
+      ;(lastWorkerInstance as any).trigger('message', successFor(m.data.payload.pageId))
+    }
+    await vi.waitFor(() => {
+      expect(workerMessages.filter(m => m.data.type === 'close').map(m => m.data.payload.docId)).toEqual(['f-done'])
+    })
+    expect(pdfSourceCache.has('f-done')).toBe(false)
+  })
+
+  it('cancel (clearQueue) closes open documents and releases waiting renders', async () => {
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(new File([''], 'doc.pdf'), new ArrayBuffer(8), 'f-cancel')
+    await settle()
+    expect(getQueueStats().pending).toBe(1)
+
+    clearQueue()
+
+    await vi.waitFor(() => expect(getQueueStats().pending).toBe(0))
+    expect(workerMessages.filter(m => m.data.type === 'close').map(m => m.data.payload.docId)).toEqual(['f-cancel'])
+    expect(pdfSourceCache.size).toBe(0)
+  })
+
+  it('cancel rejects an open that is still in flight', async () => {
+    mockOpenReply = { numPages: 1 }
+    const pending = queuePDFPages(new File([''], 'doc.pdf'), new ArrayBuffer(8), 'f-opening')
+    clearQueue()
+    await expect(pending).rejects.toThrow('cancelled')
+  })
+
+  it('marks a page as error when the worker never answers (timeout)', async () => {
+    const original = PAGE_RENDER_CONFIG.renderTimeoutMs
+    PAGE_RENDER_CONFIG.renderTimeoutMs = 30
+    try {
+      mockOpenReply = { numPages: 1 }
+      await queuePDFPages(new File([''], 'doc.pdf'), new ArrayBuffer(8), 'f-timeout')
+      await vi.waitFor(() => {
+        expect(db.savePage).toHaveBeenCalledWith(expect.objectContaining({
+          status: 'error',
+          logs: expect.arrayContaining([expect.objectContaining({ message: expect.stringContaining('timed out') })])
+        }))
+      })
+      expect(getQueueStats().pending).toBe(0)
+    } finally {
+      PAGE_RENDER_CONFIG.renderTimeoutMs = original
+    }
+  })
+
+  it('a worker crash fails in-flight renders immediately', async () => {
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(new File([''], 'doc.pdf'), new ArrayBuffer(8), 'f-crash')
+    await settle()
+
+    ;(lastWorkerInstance as any).trigger('error', { message: 'Out of memory' })
+
+    await vi.waitFor(() => expect(getQueueStats().pending).toBe(0))
+    expect(pdfEvents.emit).toHaveBeenCalledWith('pdf:page:error', expect.objectContaining({ error: 'Worker error: Out of memory' }))
+  })
+
+  it('resume re-opens the stored source in the worker (transfer) before re-queuing', async () => {
+    const page = { id: 'p-res', fileId: 'f-res', status: 'pending_render', pageNumber: 1, origin: 'pdf_generated', order: 1, logs: [] }
+    vi.mocked(db.getPagesByStatus).mockResolvedValueOnce([page as any]).mockResolvedValueOnce([])
+    const stored = new ArrayBuffer(16)
+    vi.mocked(db.getFile).mockResolvedValue({ name: 't.pdf', content: stored, size: 16 } as any)
+    vi.mocked(db.getPage).mockResolvedValue(page as any)
+
+    await resumePDFProcessing()
+    await settle()
+
+    expect(workerMessages[0]!.data).toEqual({ type: 'open', payload: { docId: 'f-res', pdfData: stored } })
+    expect(workerMessages[0]!.transfer).toEqual([stored])
+    expect(renderMessages()[0]!.data.payload.docId).toBe('f-res')
+  })
+
+  it('resume marks pages as error when the stored source cannot be opened', async () => {
+    const page = { id: 'p-res-bad', fileId: 'f-res-bad', status: 'pending_render', pageNumber: 1, origin: 'pdf_generated', order: 1 }
+    vi.mocked(db.getPagesByStatus).mockResolvedValueOnce([page as any]).mockResolvedValueOnce([])
+    vi.mocked(db.getFile).mockResolvedValue({ name: 't.pdf', content: new ArrayBuffer(4), size: 4 } as any)
+    mockOpenReply = { error: 'Corrupt' }
+
+    await resumePDFProcessing()
+
+    expect(db.savePage).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-res-bad', status: 'error' }))
+    expect(renderMessages()).toHaveLength(0)
+  })
+})
+
 describe('Coverage Gaps', () => {
   it('handleRenderSuccess: should catch internal errors', async () => {
     const { file, pdfData } = getTestData()
@@ -476,7 +681,8 @@ describe('Coverage Gaps', () => {
       // @ts-expect-error: accessing private/protected property for testing
       worker.onmessage({ data: { pageId: 'p-crash', imageBlob: new Blob() } })
     }
-    await queuePDFPages(file, pdfData, 1, 'f-crash')
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(file, pdfData, 'f-crash')
     await new Promise(res => setTimeout(res, 50))
     expect(queueLogger.error).toHaveBeenCalledWith(expect.stringContaining('Error handling render success'), expect.anything())
   })
@@ -498,7 +704,8 @@ describe('Coverage Gaps', () => {
       // @ts-expect-error: accessing private/protected property for testing
       worker.onmessage({ data: { type: 'error', payload: { pageId: 'p-crash-err', error: 'Fail' } } })
     }
-    await queuePDFPages(file, pdfData, 1, 'f-crash-err')
+    mockOpenReply = { numPages: 1 }
+    await queuePDFPages(file, pdfData, 'f-crash-err')
     await new Promise(res => setTimeout(res, 50))
     expect(queueLogger.error).toHaveBeenCalledWith(expect.stringContaining('Error handling render error'), expect.anything())
   })
@@ -536,9 +743,9 @@ describe('Coverage Gaps', () => {
     const pdfQueueModule = await import('@/services/pdf/pdfQueue')
     // Populate source cache to avoid "source data not found" error
     pdfQueueModule.pdfSourceCache.set('src_mock', {
-      data: new ArrayBuffer(0),
       totalPages: 1,
-      processedCount: 0
+      processedCount: 0,
+      fallbackFont: 'sans-serif'
     })
 
     vi.mocked(db.savePage).mockResolvedValue('p-thumb-success')
@@ -644,9 +851,9 @@ describe('Coverage Gaps', () => {
 
     const pdfQueueModule = await import('@/services/pdf/pdfQueue')
     pdfQueueModule.pdfSourceCache.set('src_mock_canvas', {
-      data: new ArrayBuffer(0),
       totalPages: 1,
-      processedCount: 0
+      processedCount: 0,
+      fallbackFont: 'sans-serif'
     })
 
     mockWorkerResponseCallback = (worker, _) => {
@@ -709,6 +916,8 @@ function setupGlobalMocks() {
   globalThis.Worker = MockWorker as unknown as typeof Worker
   mockWorkerResponseCallback = undefined
   mockWorkerLastMessage = undefined
+  workerMessages = []
+  mockOpenReply = { numPages: 1 }
 
   // @ts-expect-error: mocking global URL
   globalThis.URL = class MockURL {

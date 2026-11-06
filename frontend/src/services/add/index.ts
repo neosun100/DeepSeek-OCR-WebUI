@@ -1,5 +1,6 @@
 import type { Page } from '@/stores/pages'
 import { addLogger } from '@/utils/logger'
+import { FILE_LIMITS, formatMegabytes } from './limits'
 
 export interface FileAddResult {
   success: boolean
@@ -16,14 +17,10 @@ export interface FileProcessingOptions {
 
 class FileAddService {
   private readonly defaultOptions: FileProcessingOptions = {
-    maxFileSize: 10 * 1024 * 1024, // 10MB for images
+    maxFileSize: FILE_LIMITS.maxImageBytes,
     allowedTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'application/pdf'],
     generateThumbnails: true,
     thumbnailSize: { width: 200, height: 300 }
-  }
-
-  private readonly pdfOptions = {
-    maxFileSize: 100 * 1024 * 1024 // 100MB for PDFs
   }
 
   /**
@@ -59,13 +56,13 @@ class FileAddService {
   private validateFile(file: File, options: FileProcessingOptions): { valid: boolean; error?: string } {
     // Use appropriate size limit based on file type
     const maxFileSize = file.type === 'application/pdf'
-      ? this.pdfOptions.maxFileSize
+      ? FILE_LIMITS.maxPdfBytes
       : (options.maxFileSize || this.defaultOptions.maxFileSize!)
 
     if (file.size > maxFileSize) {
       return {
         valid: false,
-        error: `File "${file.name}" is too large. Maximum size is ${Math.round(maxFileSize / 1024 / 1024)}MB`
+        error: `File "${file.name}" is too large (${formatMegabytes(file.size)}). Maximum size is ${formatMegabytes(maxFileSize)}`
       }
     }
 
@@ -244,22 +241,12 @@ class FileAddService {
       // Import PDF service dynamically to avoid circular dependencies
       const { pdfService } = await import('@/services/pdf')
 
-      // Validate PDF file
-      const validation = pdfService.validatePDF(file)
-      if (!validation.valid) {
-        throw new Error(validation.error)
-      }
-
-      // Get PDF metadata (page count, etc.)
-      const metadata = await pdfService.getPDFMetadata(file)
-      const pageCount = metadata.pageCount || 0
-
-      if (pageCount === 0) {
+      // Validates, opens the PDF once in the render worker and queues all pages.
+      // Throws for invalid/corrupted PDFs; the page count comes from that single parse.
+      const pageCount = await pdfService.processPDF(file)
+      if (!pageCount) {
         throw new Error('PDF file appears to be empty or corrupted')
       }
-
-      // Process the PDF and queue all pages for rendering
-      await pdfService.processPDF(file)
 
       // Return empty array for now - pages will be created by the PDF processing queue
       // The pages store will be updated via events as pages are processed
