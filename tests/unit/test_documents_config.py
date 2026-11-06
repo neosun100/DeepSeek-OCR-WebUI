@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from deepseek_ocr_webui.config import Limits, Settings, _legacy_overrides
@@ -113,3 +115,27 @@ class TestSettings:
         import re
 
         assert re.fullmatch(r"[0-9a-f]{40}", Settings().model_revision)
+
+
+class TestWarmupPage:
+    """预热页是「已知真值」：文字必须完整排进图里，否则判据红的是图而不是模型（2026-11-07 真机踩到）。"""
+
+    def test_warmup_and_bench_texts_fit(self) -> None:
+        import importlib.util
+
+        from deepseek_ocr_webui.service import WARMUP_TEXT, render_text_image
+
+        bench_path = Path(__file__).resolve().parents[2] / "scripts" / "bench.py"
+        spec = importlib.util.spec_from_file_location("bench", bench_path)
+        assert spec and spec.loader
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        assert render_text_image(WARMUP_TEXT).size == (900, 160)
+        for t in bench.KNOWN:  # 基准的已知真值页同样不许被裁字
+            render_text_image(t, width=1600, height=200)
+
+    def test_overflow_raises_instead_of_clipping(self) -> None:
+        from deepseek_ocr_webui.service import render_text_image
+
+        with pytest.raises(ValueError):
+            render_text_image("很长的文字" * 200)

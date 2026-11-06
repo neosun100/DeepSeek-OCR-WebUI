@@ -345,16 +345,27 @@ def char_recall(truth: str, pred: str) -> float:
 
 
 def render_text_image(text: str, width: int = 900, height: int = 160) -> Image.Image:
-    """用 PyMuPDF 内置 CJK 字体（china-s）排一行字 ⇒ 不依赖系统字体，任何环境都能生成预热页。"""
+    """用 PyMuPDF 内置 CJK 字体（china-s）排已知文字 ⇒ 不依赖系统字体，任何环境都能生成预热页。
+
+    自动换行 + 放不下就缩字号；最小字号仍放不下 ⇒ 抛错，绝不静默裁字。
+    （2026-11-07 真机：旧版 insert_text 单行超出页宽，"识别测试 12345" 被裁掉，预热召回 0.67 —— 判据是对的，图是错的。）
+    """
     import pymupdf as fitz
 
     doc = fitz.open()
-    page = doc.new_page(width=width / 2, height=height / 2)
-    page.insert_text((14, height / 4 + 8), text, fontname="china-s", fontsize=17)
-    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-    doc.close()
-    return img
+    try:
+        page = doc.new_page(width=width / 2, height=height / 2)
+        rect = fitz.Rect(10, 6, width / 2 - 10, height / 2 - 6)
+        # insert_textbox 放不下时什么都不写、返回负数 ⇒ 同一页上换小字号重试即可
+        for size in (26, 22, 19, 16, 14, 12):
+            if page.insert_textbox(rect, text, fontname="china-s", fontsize=size, align=0) >= 0:
+                break
+        else:
+            raise ValueError(f"文字放不进 {width}x{height} 的预热页（最小字号 12 仍溢出）：{text[:40]}")
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    finally:
+        doc.close()
 
 
 __all__ = [
