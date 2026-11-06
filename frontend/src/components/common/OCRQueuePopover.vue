@@ -15,6 +15,29 @@
       <div class="header-actions" />
     </div>
 
+    <!-- Service state banner (v5: model loading / load failure) -->
+    <div
+      v-if="healthStore.isStarting"
+      class="service-banner is-warning"
+      data-testid="ocr-queue-model-loading"
+    >
+      {{ t('ocrQueuePopover.modelLoading') }}
+    </div>
+    <div
+      v-else-if="healthStore.isModelError"
+      class="service-banner is-error"
+      data-testid="ocr-queue-model-error"
+    >
+      {{ t('ocrQueuePopover.modelError', [healthStore.loadError || '-']) }}
+    </div>
+    <div
+      v-if="engineSummary"
+      class="engine-line"
+      data-testid="ocr-queue-engine"
+    >
+      {{ engineSummary }}
+    </div>
+
     <!-- Toolbar (Check All) - Fixed at top -->
     <div
       v-if="store.ocrTaskCount > 0"
@@ -210,6 +233,14 @@ const isPartiallySelected = computed(() => selectedIds.value.size > 0 && selecte
 
 
 
+// "vllm · cuda · bfloat16 · v5.0.0" from /health (v5); empty on v4 backends without engine info
+const engineSummary = computed(() => {
+  const engine = healthStore.engineInfo
+  const parts = [engine?.engine, engine?.device, engine?.dtype].filter((v): v is string => typeof v === 'string' && v !== '')
+  if (healthStore.serverVersion) parts.push(`v${healthStore.serverVersion}`)
+  return parts.join(' · ')
+})
+
 // Dynamic Status Text
 function getTaskStatusText() {
   const position = healthStore.queuePosition
@@ -332,6 +363,30 @@ defineExpose({
 .header-actions {
   display: flex;
   gap: 8px;
+}
+
+.service-banner {
+  padding: 6px 16px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.service-banner.is-warning {
+  background: #fff7e6;
+  color: #ad6800;
+}
+
+.service-banner.is-error {
+  background: #fff1f0;
+  color: #a8071a;
+  word-break: break-word;
+}
+
+.engine-line {
+  padding: 4px 16px;
+  font-size: 11px;
+  color: #888;
+  border-bottom: 1px solid #f0f0f0;
 }
 
 .list-toolbar {

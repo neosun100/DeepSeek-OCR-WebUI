@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { Mock } from 'vitest'
 import OCRQueuePopover from '@/components/common/OCRQueuePopover.vue'
 import { createTestingPinia } from '@pinia/testing'
+import { useHealthStore } from '@/stores/health'
 import { usePagesStore } from '@/stores/pages'
 import { i18n } from '@/i18n'
 import { NCheckbox } from 'naive-ui'
@@ -352,5 +353,27 @@ describe('OCRQueuePopover', () => {
 
         const vm = wrapper.vm as unknown as PopoverVM
         expect(vm.selectedIds.has('p1')).toBe(true)
+    })
+
+    it('shows model-loading banner and engine summary from v5 health', async () => {
+        const h = useHealthStore(pinia)
+        h.serviceState = 'starting'
+        h.healthInfo = {
+            status: 'starting', version: '5.0.0', backend: 'cuda', model_loaded: false,
+            engine: { engine: 'hf', device: 'cuda', dtype: 'bfloat16' }
+        } as any
+        const wrapper = mountComponent()
+        await wrapper.vm.$nextTick()
+        expect(wrapper.find('[data-testid="ocr-queue-model-loading"]').exists()).toBe(true)
+        expect(wrapper.find('[data-testid="ocr-queue-engine"]').text()).toBe('hf · cuda · bfloat16 · v5.0.0')
+    })
+
+    it('shows model error banner with load_error', async () => {
+        const h = useHealthStore(pinia)
+        h.serviceState = 'error'
+        h.healthInfo = { status: 'error', load_error: 'weights missing', backend: null, model_loaded: false } as any
+        const wrapper = mountComponent()
+        await wrapper.vm.$nextTick()
+        expect(wrapper.find('[data-testid="ocr-queue-model-error"]').text()).toContain('weights missing')
     })
 })

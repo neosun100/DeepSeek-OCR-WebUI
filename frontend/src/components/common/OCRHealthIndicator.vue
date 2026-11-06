@@ -2,7 +2,7 @@
   <NBadge
     :dot="true"
     :color="statusColor"
-    :processing="!isHealthy"
+    :processing="!isHealthy || isStarting"
     :offset="compact ? [-2, 2] : [0, 0]"
   >
     <NTooltip
@@ -19,6 +19,8 @@
           :type="buttonType"
           class="health-indicator-btn"
           :class="{ 'is-compact': compact }"
+          data-testid="health-indicator"
+          :data-state="serviceState"
         >
           <template #icon>
             <NIcon :component="StatusIcon" />
@@ -26,13 +28,45 @@
           <span v-if="!compact">{{ $t('health.ocrService') }}</span>
         </NButton>
       </template>
-      <div class="health-tooltip">
+      <div
+        class="health-tooltip"
+        data-testid="health-tooltip"
+      >
         <div class="health-status">
           <strong>{{ $t('health.status') }}:</strong> {{ statusText }}
         </div>
+        <div
+          v-if="isStarting"
+          data-testid="health-starting-hint"
+        >
+          {{ $t('health.startingTooltip') }}
+        </div>
+        <div
+          v-if="isModelError"
+          class="health-error"
+          data-testid="health-load-error"
+        >
+          {{ $t('health.modelErrorDetail', [loadError || '-']) }}
+        </div>
+        <div v-if="isUnreachable">
+          {{ $t('health.unreachableTooltip') }}
+        </div>
         <template v-if="healthInfo">
-          <div><strong>{{ $t('health.backend') }}:</strong> {{ healthInfo.backend }}</div>
-          <div><strong>{{ $t('health.platform') }}:</strong> {{ healthInfo.platform }}</div>
+          <div v-if="healthInfo.version">
+            <strong>{{ $t('health.version') }}:</strong> {{ healthInfo.version }}<span v-if="healthInfo.model_version"> · {{ healthInfo.model_version }}</span>
+          </div>
+          <div v-if="engineInfo?.engine">
+            <strong>{{ $t('health.engine') }}:</strong> {{ engineInfo.engine }}
+          </div>
+          <div
+            v-if="engineInfo?.device || healthInfo.backend"
+            data-testid="health-device"
+          >
+            <strong>{{ $t('health.device') }}:</strong> {{ engineInfo?.device || healthInfo.backend }}<span v-if="engineInfo?.dtype"> · {{ $t('health.dtype') }} {{ engineInfo.dtype }}</span>
+          </div>
+          <div v-if="healthInfo.platform">
+            <strong>{{ $t('health.platform') }}:</strong> {{ healthInfo.platform }}
+          </div>
           <div v-if="healthInfo.ocr_queue">
             <strong>{{ $t('health.queue') }}:</strong> {{ healthInfo.ocr_queue.depth }} / {{ healthInfo.ocr_queue.max_size }}
           </div>
@@ -58,7 +92,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NBadge, NButton, NIcon, NTooltip } from 'naive-ui'
-import { HeartOutline, AlertCircleOutline } from '@vicons/ionicons5'
+import { HeartOutline, AlertCircleOutline, HourglassOutline } from '@vicons/ionicons5'
 import { useHealthStore } from '@/stores/health'
 import { PRIMARY_COLOR } from '@/theme/vars'
 
@@ -77,27 +111,45 @@ const lastCheckTime = computed(() => healthStore.lastCheckTime)
 
 const isBusy = computed(() => healthStore.isBusy)
 const isFull = computed(() => healthStore.isFull)
+const isStarting = computed(() => healthStore.isStarting)
+const isModelError = computed(() => healthStore.isModelError)
+const isUnreachable = computed(() => healthStore.isUnreachable)
+const serviceState = computed(() => healthStore.serviceState)
+const loadError = computed(() => healthStore.loadError)
+const engineInfo = computed(() => healthStore.engineInfo)
 
+const WARNING_COLOR = '#f0a020'
+const ERROR_COLOR = '#d03050'
+
+// Priority: hard failures first, then transient states, then load levels
 const statusColor = computed(() => {
-  if (isFull.value) return '#d03050' // Red
-  if (isBusy.value) return '#f0a020' // Orange/Yellow
-  return isHealthy.value ? PRIMARY_COLOR : '#d03050'
+  if (isModelError.value || !isHealthy.value) return ERROR_COLOR
+  if (isStarting.value) return WARNING_COLOR
+  if (isFull.value) return ERROR_COLOR
+  if (isBusy.value) return WARNING_COLOR
+  return PRIMARY_COLOR
 })
 
 const buttonType = computed(() => {
+  if (isModelError.value || !isHealthy.value) return 'error'
+  if (isStarting.value) return 'warning'
   if (isFull.value) return 'error'
   if (isBusy.value) return 'warning'
-  return isHealthy.value ? 'success' : 'error'
+  return 'success'
 })
 
 const StatusIcon = computed(() => {
+  if (isStarting.value) return HourglassOutline
   return isHealthy.value ? HeartOutline : AlertCircleOutline
 })
 
 const statusText = computed(() => {
+  if (isModelError.value) return t('health.modelError')
+  if (!isHealthy.value) return t('health.unavailable')
+  if (isStarting.value) return t('health.starting')
   if (isFull.value) return t('health.full')
   if (isBusy.value) return t('health.busy')
-  return isHealthy.value ? t('health.healthy') : t('health.unavailable')
+  return t('health.healthy')
 })
 
 function formatTime(date: Date): string {
@@ -136,6 +188,11 @@ const tooltipProps = {
 
 .health-status {
   margin-bottom: 4px;
+}
+
+.health-error {
+  font-weight: 600;
+  word-break: break-word;
 }
 
 .health-time {
