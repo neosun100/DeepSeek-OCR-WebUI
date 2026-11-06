@@ -846,7 +846,7 @@ async function resumeSinglePage(page: DBPage, fileName: string, sourceId: string
   // Determine page number
   let pageNumber = page.pageNumber
   if (!pageNumber) {
-    // Fallback: extract from filename (e.g. "foo_1.jpg"; pages created before v4.2 used .png)
+    // Fallback: extract from filename (e.g. "foo_1.jpg"; pages created before v5.0 used .png)
     const match = page.fileName.match(/_(\d+)\.(?:png|jpe?g)$/)
     if (match && match[1]) pageNumber = parseInt(match[1])
   }
