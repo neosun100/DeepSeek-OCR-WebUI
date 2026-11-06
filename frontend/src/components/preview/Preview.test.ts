@@ -673,4 +673,68 @@ describe('Preview.vue', () => {
     // Verify test execution completed without errors
     expect(buttons.length).toBeGreaterThanOrEqual(0)
   })
+
+  describe('XSS sanitization of rendered markdown', () => {
+    // OCR models copy text printed on the scan verbatim, so these payloads can
+    // arrive as page markdown. They must never reach v-html in executable form.
+    const payloads = [
+      '<img src=x onerror=alert(1)>',
+      '<script>alert(1)</script>',
+      '<a href="javascript:alert(1)">x</a>',
+      '<svg onload=alert(1)><circle r="1"/></svg>',
+      'inline <img src=x onerror=alert(1)> in a paragraph'
+    ]
+
+    async function renderMd(content: string): Promise<string> {
+      vi.mocked(db.getPageMarkdown).mockResolvedValue({ content } as any)
+      const wrapper = mountPreview({ currentPage: mockPage })
+      const vm = wrapper.vm as any
+      await vm.loadMarkdown('p1')
+      await flushPromises()
+      return vm.renderedMd as string
+    }
+
+    it.each(payloads)('strips executable content from %s', async (payload) => {
+      const html = (await renderMd(payload)).toLowerCase()
+      expect(html).not.toContain('onerror')
+      expect(html).not.toContain('onload')
+      expect(html).not.toContain('<script')
+      // eslint-disable-next-line sonarjs/code-eval -- asserting the scheme is absent; nothing is evaluated
+      expect(html).not.toContain('javascript:')
+    })
+
+    it('sanitizes the ocrText fallback path too', async () => {
+      vi.mocked(db.getPageMarkdown).mockResolvedValue(undefined)
+      const wrapper = mountPreview({
+        currentPage: { ...mockPage, ocrText: '<img src=x onerror=alert(1)>' }
+      })
+      const vm = wrapper.vm as any
+      await vm.loadMarkdown('p1')
+      await flushPromises()
+      expect(vm.renderedMd).toContain('<img')
+      expect(vm.renderedMd.toLowerCase()).not.toContain('onerror')
+    })
+
+    it('keeps OCR tables with colspan/rowspan', async () => {
+      const html = await renderMd('<table><tr><td colspan="2" rowspan="3">a</td></tr></table>')
+      expect(html).toContain('<table>')
+      expect(html).toContain('colspan="2"')
+      expect(html).toContain('rowspan="3"')
+      expect(html).toContain('>a</td>')
+    })
+
+    it('keeps KaTeX HTML and MathML output', async () => {
+      const html = await renderMd('Formula $x^2$ here')
+      expect(html).toContain('class="katex"')
+      expect(html).toContain('<math')
+      expect(html).toContain('<msup>')
+      expect(html).toContain('<annotation encoding="application/x-tex">x^2</annotation>')
+      expect(html).toContain('style="')
+    })
+
+    it('keeps data: image URLs', async () => {
+      const html = await renderMd('![a](data:image/png;base64,iVBORw0KGgo=)')
+      expect(html).toContain('src="data:image/png;base64,iVBORw0KGgo="')
+    })
+  })
 })

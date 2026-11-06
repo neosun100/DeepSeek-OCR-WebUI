@@ -107,7 +107,6 @@ test.describe('OCR Mode Selector - Direct Modes', () => {
 
     // Test Case 4: Mode Switching and Persistence
     test('should persist selected mode and switch correctly', async ({ page, browserName }) => {
-        // Skip on Chromium and Webkit due to CORS 502 errors in console
         // Skip on Firefox due to timeout issues with dropdown
         test.skip(browserName === 'firefox', 'Timeout issues with dropdown on Firefox');
 
@@ -118,42 +117,45 @@ test.describe('OCR Mode Selector - Direct Modes', () => {
         // Wait for page viewer to be ready
         await pageViewer.waitForReady();
 
-        // Verify default is "Scan to Document"
-        const defaultLabel = await pageViewer.getCurrentModeLabel();
-        expect(defaultLabel).toContain('Scan to Document');
-
-        // Select "General OCR" from dropdown
-        await pageViewer.selectOCRMode('ocr');
-
-        // Mock OCR API (longer delay)
+        const trigger = page.getByTestId('ocr-trigger-btn');
+        // Requests must be mocked before the first selection: selecting a
+        // mode from the dropdown runs OCR immediately (OCRModeSelector emits
+        // 'run' on select). Previously the mock was registered afterwards, so
+        // that first run went to the real network.
+        // The mock answers prompt_type 'document', so every run continues
+        // into the doc-generation pipeline (markdown -> docx -> pdf).
         await apiMocks.mockOCR({ delay: 1500 });
 
-        // Click main button (should trigger 'ocr' mode, not 'document')
-        await pageViewer.clickOCRModeMainButton();
+        // Verify default is "Scan to Document"
+        await expect(trigger).toContainText('Scan to Document');
 
-        // Verify OCR is triggered
-        await expect.poll(async () => await ocrPage.getPageStatus(0), {
-            timeout: 5000
-        }).toBe('recognizing');
+        // Root cause of the old flake: the next interaction started after
+        // waitForOCRSuccess, i.e. while doc generation was still running. The
+        // selector is disabled then, except in short gaps where the status
+        // reads 'completed' mid-pipeline; a click in such a gap is swallowed
+        // (menu never opens), and a run started there gets its status
+        // overwritten by the previous pipeline. Under full-suite CPU load the
+        // pipeline is slow enough to hit this. Each step therefore waits for
+        // that run's generation to finish completely.
+        const runAndSettle = async (action: () => Promise<void>) => {
+            const doneBefore = await ocrPage.getGenerationDoneCount(0);
+            await action();
+            await expect.poll(async () => await ocrPage.getPageStatus(0), {
+                timeout: 5000
+            }).toBe('recognizing');
+            await ocrPage.waitForGenerationDone(0, doneBefore);
+        };
 
-        // Wait a bit for mode label to update
-        await page.waitForTimeout(500);
+        // Selecting "General OCR" runs OCR and updates the label
+        await runAndSettle(() => pageViewer.selectOCRMode('ocr'));
+        await expect(trigger).toContainText('General OCR');
 
-        // Verify the label changed to "General OCR"
-        const updatedLabel = await pageViewer.getCurrentModeLabel();
-        expect(updatedLabel).toContain('General OCR');
+        // Main button re-runs with the persisted mode, not the default
+        await runAndSettle(() => pageViewer.clickOCRModeMainButton());
+        await expect(trigger).toContainText('General OCR');
 
-        // Wait for OCR to complete
-        await ocrPage.waitForOCRSuccess(0);
-
-        // Now switch to "Parse Figure"
-        await pageViewer.selectOCRMode('figure');
-
-        // Click main button again
-        await pageViewer.clickOCRModeMainButton();
-
-        // Should trigger figure mode
-        const finalLabel = await pageViewer.getCurrentModeLabel();
-        expect(finalLabel).toContain('Parse Figure');
+        // Switching to "Parse Figure" runs it and becomes the new main action
+        await runAndSettle(() => pageViewer.selectOCRMode('figure'));
+        await expect(trigger).toContainText('Parse Figure');
     });
 });

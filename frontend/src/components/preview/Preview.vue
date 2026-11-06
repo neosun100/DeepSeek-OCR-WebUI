@@ -198,6 +198,7 @@ import MarkdownItKatex from '@iktakahiro/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 import { db } from '@/db'
 import { uiLogger } from '@/utils/logger'
+import { sanitizeRenderedHtml } from '@/utils/sanitize-html'
 import 'github-markdown-css/github-markdown.css'
 import { exportService } from '@/services/export'
 import { PRIMARY_COLOR } from '@/theme/vars'
@@ -249,6 +250,11 @@ const mdRenderer = new MarkdownIt({
     typographer: true
 })
 mdRenderer.use(MarkdownItKatex)
+
+// All markdown bound via v-html must go through here: html:true lets OCR output
+// inject raw tags, so the rendered HTML is sanitized (see sanitize-html.ts).
+const renderMarkdownSafe = (markdown: string): string =>
+    sanitizeRenderedHtml(mdRenderer.render(markdown))
 
 
 
@@ -538,7 +544,7 @@ async function loadMarkdown(pageId: string) {
             mdContent.value = record.content
             // 2. Process images
             const processedMd = await processMarkdownImages(record.content)
-            renderedMd.value = mdRenderer.render(processedMd)
+            renderedMd.value = renderMarkdownSafe(processedMd)
         } else {
              // Fallback to OCR text if no markdown yet, but avoid showing JSON (e.g. from Find mode)
              const raw = props.currentPage?.ocrText || ''
@@ -546,7 +552,7 @@ async function loadMarkdown(pageId: string) {
              
              if (!isJson) {
                 mdContent.value = raw
-                renderedMd.value = mdRenderer.render(mdContent.value)
+                renderedMd.value = renderMarkdownSafe(mdContent.value)
              } else {
                 mdContent.value = '' // Don't show confusing raw data in Preview
                 renderedMd.value = '' 

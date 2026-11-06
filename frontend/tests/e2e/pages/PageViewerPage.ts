@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 
 type OCRPromptType = 'document' | 'ocr' | 'free' | 'figure' | 'describe' | 'find' | 'freeform';
 
@@ -135,22 +135,23 @@ export class PageViewerPage {
       freeform: 'Custom Prompt'
     };
 
-    // Open dropdown
+    // The trigger is disabled while the page is processing (recognizing,
+    // pending_gen, generating_*). Callers must first wait for the page to
+    // settle (OCRPage.waitForPageStatus): a click that lands in a transient
+    // enabled window (e.g. ocr_success -> pending_gen) is swallowed once
+    // Vue re-renders the button disabled, and the menu never opens.
+    await expect(this.page.getByTestId('ocr-mode-dropdown')).toBeEnabled();
     await this.clickOCRModeDropdown();
 
-    // Wait for dropdown menu to appear (increased timeout for browser compatibility)
-    await this.page.waitForSelector('.n-dropdown-menu', { state: 'visible', timeout: 10000 });
-
-    // Additional wait for dropdown to be fully rendered  
-    await this.page.waitForTimeout(500);
-
-    // Click the menu item within dropdown menu only (avoid matching button text)
+    // Scope to the menu so the trigger button's own label is never matched;
+    // the locator click auto-waits for the option to be visible and stable.
     const dropdownMenu = this.page.locator('.n-dropdown-menu');
     const menuItem = dropdownMenu.getByText(modeTextMap[mode], { exact: true });
     await menuItem.click();
 
-    // Wait for dropdown to close and mode to be applied
-    await this.page.waitForTimeout(300);
+    // Menu closed. The trigger label is not asserted here: when the queue is
+    // full or the service is unhealthy the selection is rejected on purpose.
+    await expect(dropdownMenu).toBeHidden();
   }
 
   /**
