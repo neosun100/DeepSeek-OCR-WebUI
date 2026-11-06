@@ -284,7 +284,7 @@ describe('SandwichPDFBuilder', () => {
         expect(mockPdfDoc.save).toHaveBeenCalled()
     })
 
-    it('should handle unparseable raw_text gracefully (no text drawn)', async () => {
+    it('should keep untagged raw_text in the text layer instead of dropping it (issue #49)', async () => {
         const ocrResult = {
             success: true,
             text: 'text',
@@ -296,8 +296,8 @@ describe('SandwichPDFBuilder', () => {
 
         await sandwichPDFBuilder.generate(mockBlob, ocrResult)
 
-        // Parser returns empty array, no text drawn
-        expect(mockPage.drawText).not.toHaveBeenCalled()
+        // Untagged text is kept as a full-page block, so it stays searchable
+        expect(mockPage.drawText).toHaveBeenCalled()
     })
 
     it('should fail if both JPG and PNG embedding fails', async () => {

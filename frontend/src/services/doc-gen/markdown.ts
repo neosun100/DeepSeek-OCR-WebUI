@@ -1,5 +1,6 @@
 import type { OCRResult, OCRBox } from '@/services/ocr'
 import { normalizeBox } from '@/services/ocr/parser'
+import { tokenizeRawText, unionBox, type RawSegment } from './ocr-parser'
 
 interface Block {
     type: string
@@ -7,6 +8,8 @@ interface Block {
     box: number[] // [x1, y1, x2, y2]
     imageId?: string
     isImage: boolean
+    /** No reliable coordinates: rendered standalone in reading order, never merged into layout rows */
+    anchored?: boolean
 }
 
 
@@ -83,94 +86,65 @@ export class MarkdownAssembler {
         return markdown.trim()
     }
 
+    /**
+     * Tokenize raw_text into layout blocks. Never drops text (issue #49):
+     * - multi-box `<|det|>[[..],[..]]` blocks use the union box
+     * - blocks with unparseable coordinates and free text keep their content and are
+     *   "anchored" right after the previous block in reading order (no reliable position)
+     */
     private parseBlocks(ocrResult: OCRResult, imageMap: Map<string, string>): Block[] {
         const blocks: Block[] = []
-        // Regex to capture Ref, Det, and Content
-        // <|ref|>TYPE<|/ref|><|det|>[[x,y,x,y]]<|/det|>CONTENT
-        const regex = /<\|ref\|>(.*?)<\|\/ref\|><\|det\|>\[\[(.*?)\]\]<\|\/det\|>([\s\S]*?)(?=(?:<\|ref\|>)|$)/g
+        const pageW = ocrResult.image_dims?.w || 1000
+        let prevBottom = 0
 
-        let lastIndex = 0
-        let match
-
-        while ((match = regex.exec(ocrResult.raw_text)) !== null) {
-            // 1. Capture any text preceding this match (the "gap")
-            const gapText = ocrResult.raw_text.substring(lastIndex, match.index)
-            if (gapText.trim()) {
+        for (const seg of tokenizeRawText(ocrResult.raw_text)) {
+            if (seg.boxes.length === 0) {
+                if (!seg.content) continue
+                const y = prevBottom
                 blocks.push({
-                    type: 'text',
-                    content: this.cleanContent(gapText.trim()),
-                    box: [0, 0, ocrResult.image_dims.w, 0], // Unknown position, assume top
-                    isImage: false
+                    type: seg.type,
+                    content: this.cleanContent(seg.content),
+                    box: [0, y, pageW, y],
+                    isImage: false,
+                    anchored: true
                 })
+                continue
             }
 
-            // 2. Process the match
-            const block = this.processBlockMatch(match, ocrResult, imageMap)
-            if (block) {
-                blocks.push(block)
-            }
-
-            lastIndex = regex.lastIndex
-        }
-
-        // 3. Capture any remaining text after the last match
-        if (lastIndex < ocrResult.raw_text.length) {
-            const tailText = ocrResult.raw_text.substring(lastIndex)
-            if (tailText.trim()) {
-                blocks.push({
-                    type: 'text',
-                    content: this.cleanContent(tailText.trim()),
-
-                    box: [0, 0, ocrResult.image_dims!.w, ocrResult.image_dims!.h], // Assume bottom
-                    isImage: false
-                })
-            }
+            const block = this.processSegment(seg, ocrResult, imageMap)
+            blocks.push(block)
+            prevBottom = Math.max(prevBottom, block.box[3] || 0)
         }
 
         return blocks
     }
 
+    private processSegment(seg: RawSegment, ocrResult: OCRResult, imageMap: Map<string, string>): Block {
+        const type = seg.type
 
-    private processBlockMatch(match: RegExpExecArray, ocrResult: OCRResult, imageMap: Map<string, string>): Block | null {
-        const type = match[1]!.trim().toLowerCase()
-        const coordsStr = match[2]!
-        const rawContent = match[3]!
-        const coords = coordsStr.split(',').map(Number)
-
-        if (coords.length !== 4) return null
-
-        // Map to image and find matching box for accurate coordinates
-        const matchedIndex = this.findMatchingBoxIndex(coords, ocrResult.boxes, ocrResult.image_dims)
-        const imageId = matchedIndex !== -1 ? imageMap.get(matchedIndex.toString()) : undefined
+        // Map each box of the block to the boxes array; the first box backed by a
+        // sliced image turns the block into an image block
+        let imageId: string | undefined
+        const absBoxes: number[][] = []
+        for (const coords of seg.boxes) {
+            const matchedIndex = this.findMatchingBoxIndex(coords, ocrResult.boxes, ocrResult.image_dims)
+            if (!imageId && matchedIndex !== -1) imageId = imageMap.get(matchedIndex.toString())
+            // Prefer accurate pixel coordinates from the boxes array; else normalize raw coords
+            const matched = matchedIndex !== -1 ? ocrResult.boxes[matchedIndex] : undefined
+            absBoxes.push(matched ? [...matched.box] : normalizeBox(coords, ocrResult.image_dims!))
+        }
 
         let isImage = (type === 'image' || type === 'figure')
-        let content = this.cleanContent(rawContent.trim())
+        let content = this.cleanContent(seg.content)
 
-        // If we have an image ID, force treat as image and generate Markdown link
         if (imageId) {
             isImage = true
-            const caption = `Figure ${this.figureCount++}`
-            content = `![${caption}](scan2doc-img:${imageId})`
+            const link = `![Figure ${this.figureCount++}](scan2doc-img:${imageId})`
+            // Keep any recognized text inside an image block instead of replacing it
+            content = content ? `${link}<br/>${content}` : link
         }
 
-        // Use boxes array coordinates if available (more accurate than normalized raw_text coords)
-        // Otherwise, normalize the raw_text coordinates
-        let absBox: number[]
-        if (matchedIndex !== -1 && ocrResult.boxes[matchedIndex]) {
-            // Use the accurate pixel coordinates from boxes array
-            absBox = ocrResult.boxes[matchedIndex]!.box
-        } else {
-            // Fallback: normalize the raw_text coordinates
-            absBox = normalizeBox(coords, ocrResult.image_dims!)
-        }
-
-        return {
-            type,
-            content,
-            box: absBox,
-            imageId,
-            isImage
-        }
+        return { type, content, box: unionBox(absBoxes), imageId, isImage }
     }
 
     private cleanContent(text: string): string {
@@ -265,6 +239,13 @@ export class MarkdownAssembler {
     }
 
     /**
+     * Blocks rendered as their own row: headings, and anchored blocks without coordinates.
+     */
+    private isStandalone(block: Block): boolean {
+        return this.isHeadingType(block) || block.anchored === true
+    }
+
+    /**
      * Analyze layout and identify visual rows from columns.
      * A visual row contains blocks from different columns that have Y-axis overlap.
      * 
@@ -294,7 +275,7 @@ export class MarkdownAssembler {
 
             // Headings are always rendered as single-column rows
             // They do not participate in multi-column layout
-            if (this.isHeadingType(seedBlock)) {
+            if (this.isStandalone(seedBlock)) {
                 assignedBlocks.add(seedBlock)
                 visualRows.push(this.createHeadingVisualRow(seedBlock))
                 continue
@@ -343,12 +324,20 @@ export class MarkdownAssembler {
         const rowBlocks: Block[] = [seedBlock]
         assignedBlocks.add(seedBlock)
 
+        // A row must not swallow blocks that start below the next heading/anchored block,
+        // otherwise their content is rendered above that heading (cross-heading merge)
+        const seedTop = seedBlock.box[1] || 0
+        const boundary = allBlocks.reduce((min, b) => {
+            const top = b.box[1] || 0
+            return this.isStandalone(b) && top > seedTop ? Math.min(min, top) : min
+        }, Infinity)
+
         while (true) {
             const overlapping = allBlocks.find(block => {
-                if (assignedBlocks.has(block) || this.isHeadingType(block)) return false
+                if (assignedBlocks.has(block) || this.isStandalone(block)) return false
                 const blockTop = block.box[1] || 0
                 const blockBottom = block.box[3] || 0
-                return blockTop < rowBottom && blockBottom > rowTop
+                return blockTop < boundary && blockTop < rowBottom && blockBottom > rowTop
             })
 
             if (!overlapping) break

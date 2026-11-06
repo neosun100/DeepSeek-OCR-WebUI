@@ -2,6 +2,7 @@
  * Shared OCR raw_text parsing utilities
  * Used by both Markdown and PDF generation
  */
+import { consola } from 'consola'
 
 export interface ParsedBlock {
     type: string
@@ -20,11 +21,132 @@ export interface OCRBox {
 }
 
 /**
+ * Layout labels emitted by DeepSeek-OCR / OCR-2 in document mode.
+ * In ocr / find mode the `<|ref|>` label is the recognized text itself, so a label that is
+ * NOT in this set is content and must be kept (dropping it loses text in exports, issue #49).
+ * Intentionally duplicated from the backend; authoritative source:
+ * server/deepseek_ocr_webui/grounding.py `LAYOUT_LABELS`.
+ */
+export const LAYOUT_LABELS: ReadonlySet<string> = new Set([
+    'title', 'sub_title', 'text', 'table', 'table_caption', 'table_footnote', 'image', 'image_caption',
+    'figure', 'figure_caption', 'formula', 'equation', 'header', 'footer', 'page_header', 'page_footer',
+    'page_number', 'list', 'list_item', 'code', 'caption', 'footnote', 'reference', 'abstract', 'author',
+    'algorithm', 'chart', 'seal', 'aside_text'
+])
+
+export function isLayoutLabel(label: string): boolean {
+    return LAYOUT_LABELS.has(label.trim().toLowerCase())
+}
+
+/**
+ * One grounding segment of raw_text.
+ * - `boxes` holds every `[x1,y1,x2,y2]` found inside `<|det|>` (a block may carry several, issue #49).
+ * - `boxes` is empty when the coordinates could not be parsed; the content is still kept.
+ */
+export interface RawSegment {
+    kind: 'block' | 'text'
+    type: string
+    content: string
+    boxes: number[][]
+    parseError?: string
+}
+
+// `<|ref|>LABEL<|/ref|>` + optional whitespace + `<|det|>COORDS<|/det|>`; COORDS is free-form and
+// parsed separately so a malformed coordinate list never swallows the block's content.
+const BLOCK_HEADER_RE = /<\|ref\|>([\s\S]*?)<\|\/ref\|>\s*<\|det\|>([\s\S]*?)<\|\/det\|>/g
+// One `[...]` group; its contents are validated as exactly 4 finite numbers in parseDetBoxes
+const BOX_RE = /\[([^[\]]*)\]/g
+const ORPHAN_TAG_RE = /<\|\/?(?:ref|det|grounding)\|>/g
+
+/**
+ * Extract every 4-number box from a `<|det|>` payload such as `[[1,2,3,4],[5,6,7,8]]`.
+ */
+export function parseDetBoxes(coords: string): number[][] {
+    const out: number[][] = []
+    for (const m of coords.matchAll(BOX_RE)) {
+        const parts = (m[1] ?? '').split(',').map(v => v.trim())
+        const nums = parts.map(Number)
+        if (parts.length === 4 && parts.every(Boolean) && nums.every(Number.isFinite)) out.push(nums)
+    }
+    return out
+}
+
+/**
+ * Bounding box that covers all boxes of a multi-box block.
+ */
+export function unionBox(boxes: number[][]): [number, number, number, number] {
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity
+    for (const b of boxes) {
+        x1 = Math.min(x1, b[0] ?? 0)
+        y1 = Math.min(y1, b[1] ?? 0)
+        x2 = Math.max(x2, b[2] ?? 0)
+        y2 = Math.max(y2, b[3] ?? 0)
+    }
+    return [x1, y1, x2, y2]
+}
+
+/**
+ * Split raw_text into ordered segments without ever discarding text.
+ * Free text between/around blocks becomes `kind: 'text'` segments with no boxes.
+ */
+export function tokenizeRawText(rawText: string): RawSegment[] {
+    const segments: RawSegment[] = []
+    if (!rawText) return segments
+
+    const headers = [...rawText.matchAll(BLOCK_HEADER_RE)]
+    let cursor = 0
+
+    const pushText = (text: string) => {
+        const cleaned = text.replace(ORPHAN_TAG_RE, '').trim()
+        if (cleaned) segments.push({ kind: 'text', type: 'text', content: cleaned, boxes: [] })
+    }
+
+    headers.forEach((m, i) => {
+        const start = m.index ?? 0
+        pushText(rawText.substring(cursor, start))
+
+        const next = headers[i + 1]
+        const contentEnd = next ? (next.index ?? rawText.length) : rawText.length
+        segments.push(buildBlockSegment(m, rawText.substring(start + m[0].length, contentEnd)))
+        cursor = contentEnd
+    })
+
+    pushText(rawText.substring(cursor))
+    return segments
+}
+
+function buildBlockSegment(header: RegExpMatchArray, rawBody: string): RawSegment {
+    const label = (header[1] ?? '').trim()
+    const coords = header[2] ?? ''
+    const body = rawBody.replace(ORPHAN_TAG_RE, '').trim()
+
+    // ocr / find mode: the label IS the recognized text → keep it as content
+    const textLabel = label && !isLayoutLabel(label) ? label : ''
+    const content = [textLabel, body].filter(Boolean).join(' ')
+    const type = textLabel ? 'text' : label.toLowerCase() || 'text'
+
+    const boxes = parseDetBoxes(coords)
+    const segment: RawSegment = { kind: 'block', type, content, boxes }
+    if (boxes.length === 0) {
+        segment.parseError = `unparseable <|det|> coordinates: ${coords.slice(0, 80)}`
+        // Degrade visibly: keep the text, log that layout info was lost
+        consola.withTag('DocGen').warn('[ocr-parser] keeping block without coordinates', {
+            type,
+            coords: coords.slice(0, 80),
+            contentChars: content.length
+        })
+    }
+    return segment
+}
+
+/**
  * Parse OCR raw_text with special tags into structured blocks.
  * Uses the boxes array for accurate coordinates when available.
- * 
- * Format: <|ref|>TYPE<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>CONTENT
- * 
+ *
+ * Format: <|ref|>TYPE<|/ref|><|det|>[[x1,y1,x2,y2], ...]<|/det|>CONTENT
+ * Multi-box blocks use the union of their boxes. Blocks whose coordinates cannot be parsed
+ * and free text are kept with a full-page box (text is never dropped, issue #49).
+ *
  * @param rawText The raw_text string from OCR result
  * @param imageDims Image dimensions for coordinate normalization
  * @param boxes Optional boxes array with accurate coordinates
@@ -34,48 +156,28 @@ export function parseRawText(rawText: string, imageDims: ImageDims, boxes?: OCRB
     const parsedBlocks: ParsedBlock[] = []
     const usedBoxIndices = new Set<number>()
 
-    if (!rawText) return parsedBlocks
-
-    // Regex to capture Ref, Det, and Content
-    // <|ref|>TYPE<|/ref|><|det|>[[x,y,x,y]]<|/det|>CONTENT
-    const regex = /<\|ref\|>(.*?)<\|\/ref\|><\|det\|>\[\[(.*?)\]\]<\|\/det\|>([\s\S]*?)(?=(?:<\|ref\|>)|$)/g
-
-    let match
-    while ((match = regex.exec(rawText)) !== null) {
-        const block = processMatch(match, imageDims, boxes, usedBoxIndices)
-        if (block) {
-            parsedBlocks.push(block)
+    for (const seg of tokenizeRawText(rawText)) {
+        if (seg.boxes.length === 0) {
+            if (!seg.content) continue
+            parsedBlocks.push({ type: seg.type, content: seg.content, box: [0, 0, imageDims.w, imageDims.h] })
+            continue
         }
+        const finalBox = seg.boxes.length === 1
+            ? resolveBoxCoordinates(seg.boxes[0]!, imageDims, boxes, usedBoxIndices)
+            : resolveMultiBox(seg.boxes, imageDims, boxes, usedBoxIndices)
+        parsedBlocks.push({ type: seg.type, content: seg.content, box: finalBox })
     }
 
     return parsedBlocks
 }
 
-/**
- * Process a single regex match and return a ParsedBlock or null
- */
-function processMatch(
-    match: RegExpExecArray,
+function resolveMultiBox(
+    rawBoxes: number[][],
     imageDims: ImageDims,
     boxes: OCRBox[] | undefined,
     usedBoxIndices: Set<number>
-): ParsedBlock | null {
-    const typeMatch = match[1]
-    const coordsStr = match[2]
-    const rawContent = match[3]
-
-    // Skip if any capture group is undefined
-    if (!typeMatch || !coordsStr || rawContent === undefined) return null
-
-    const type = typeMatch.trim().toLowerCase()
-    const rawCoords = coordsStr.split(',').map(Number)
-
-    if (rawCoords.length !== 4) return null
-
-    const content = rawContent.trim()
-    const finalBox = resolveBoxCoordinates(rawCoords, imageDims, boxes, usedBoxIndices)
-
-    return { type, content, box: finalBox }
+): [number, number, number, number] {
+    return unionBox(rawBoxes.map(b => resolveBoxCoordinates(b, imageDims, boxes, usedBoxIndices)))
 }
 
 /**
