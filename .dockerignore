@@ -18,4 +18,4 @@ frontend/dist
 frontend/test-results
 frontend/playwright-report
 frontend/coverage
-frontend/tests
+# frontend/tests 不排除：src/**/*.test.ts 引用 tests/ 下工具，vue-tsc -b 构建期会类型检查它们（真机构建失败抓到）

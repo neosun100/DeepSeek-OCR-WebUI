@@ -46,7 +46,7 @@ uv sync -q --frozen --group dev || { echo "VERDICT_AT_END: DOCKER_BLOCKED:uv_syn
 for target in hf vllm; do
   note "build $target"
   t0=$(date +%s)
-  if docker build -q --target "$target" -t "dsocr:$target" . > "$RES/build-$target.log" 2>&1; then
+  if docker build --progress=plain --target "$target" -t "dsocr:$target" . > "$RES/build-$target.log" 2>&1; then
     size=$(docker image inspect "dsocr:$target" --format '{{.Size}}')
     echo "{\"target\":\"$target\",\"seconds\":$(( $(date +%s) - t0 )),\"bytes\":$size}" | tee "$RES/build-$target.json"
   else

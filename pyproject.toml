@@ -89,3 +89,15 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "BLE"]
+
+# Linux 上 torch 走 cu126 官方 index：PyPI 默认 wheel 是 cu130 ⇒ 要求宿主机驱动 ≥ 580（#46 同类问题，
+# 2026-11-07 在 T4 实测 torch 2.14.0+cu130）。cu126 toolkit 要求 ≥ 560，CUDA 12 minor-version 兼容可放宽到 ≥ 525。
+# macOS（MPS）与 Windows 仍走 PyPI。
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux'" }]
