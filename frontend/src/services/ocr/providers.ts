@@ -27,22 +27,25 @@ export function parseErrorBody(body: unknown): ParsedErrorBody {
     const b = body as Record<string, unknown>
     if (typeof b.request_id === 'string') out.requestId = b.request_id
 
-    const detail = b.detail
-    if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
-        const d = detail as Record<string, unknown>
-        if (typeof d.error === 'string') out.code = d.error
-        if (typeof d.message === 'string') out.message = d.message
-        out.actual = d.actual
-        out.limit = d.limit
-    } else if (typeof detail === 'string') {
-        out.message = detail
-    } else if (Array.isArray(detail) && detail.length > 0) {
-        // FastAPI default 422 shape: [{loc, msg, type}]
-        const first = detail[0] as Record<string, unknown>
-        if (typeof first?.msg === 'string') out.message = first.msg
-    }
+    Object.assign(out, parseDetail(b.detail))
     if (!out.message && typeof b.error === 'string') out.message = b.error
     return out
+}
+
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+
+function parseDetail(detail: unknown): Partial<ParsedErrorBody> {
+    if (typeof detail === 'string') return { message: detail }
+    if (Array.isArray(detail)) {
+        // FastAPI default 422 shape: [{loc, msg, type}]
+        const first = detail[0] as Record<string, unknown> | undefined
+        return { message: str(first?.msg) }
+    }
+    if (detail && typeof detail === 'object') {
+        const d = detail as Record<string, unknown>
+        return { code: str(d.error), message: str(d.message), actual: d.actual, limit: d.limit }
+    }
+    return {}
 }
 
 function parseRetryAfter(response: Response): number | null {
