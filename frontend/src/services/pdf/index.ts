@@ -2,6 +2,7 @@ import { queuePDFPages, resumePDFProcessing } from './pdfQueue'
 import { pdfEvents } from './events'
 import { db } from '@/db/index'
 import { pdfLogger } from '@/utils/logger'
+import { FILE_LIMITS, formatMegabytes } from '@/services/add/limits'
 
 // Initialize enhanced PDF renderer (font preloading for the fallback-font choice)
 import { enhancedPdfRenderer } from './enhancedPdfRenderer'
@@ -125,12 +126,10 @@ export class PDFService {
       }
     }
 
-    // Check file size limit (100MB)
-    const maxSize = 100 * 1024 * 1024
-    if (file.size > maxSize) {
+    if (file.size > FILE_LIMITS.maxPdfBytes) {
       return {
         valid: false,
-        error: `File "${file.name}" is too large, maximum supported size is ${Math.round(maxSize / 1024 / 1024)}MB`
+        error: `File "${file.name}" is too large (${formatMegabytes(file.size)}), maximum supported size is ${formatMegabytes(FILE_LIMITS.maxPdfBytes)}`
       }
     }
 

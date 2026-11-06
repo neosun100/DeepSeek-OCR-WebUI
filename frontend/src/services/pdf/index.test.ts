@@ -4,6 +4,7 @@ import { queuePDFPages, resumePDFProcessing } from '@/services/pdf/pdfQueue'
 import { pdfEvents } from '@/services/pdf/events'
 import { db } from '@/db/index'
 import { pdfLogger } from '@/utils/logger'
+import { FILE_LIMITS } from '@/services/add/limits'
 
 vi.mock('@/services/pdf/pdfQueue', () => ({
   queuePDFPages: vi.fn(),
@@ -63,9 +64,17 @@ describe('PDFService', () => {
     expect(pdfService.validatePDF(file)).toEqual({ valid: false, error: expect.stringContaining('is empty') })
   })
 
-  it('validatePDF: should fail for large files > 100MB', () => {
-    const file = { name: 'large.pdf', type: 'application/pdf', size: 101 * 1024 * 1024 } as File
-    expect(pdfService.validatePDF(file)).toEqual({ valid: false, error: expect.stringContaining('too large') })
+  it('validatePDF: should fail above the shared PDF limit and report actual + max size', () => {
+    const file = { name: 'large.pdf', type: 'application/pdf', size: FILE_LIMITS.maxPdfBytes + 1 } as File
+    const result = pdfService.validatePDF(file)
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('too large')
+    expect(result.error).toContain('maximum supported size is 500MB')
+  })
+
+  it('validatePDF: should accept a file exactly at the limit', () => {
+    const file = { name: 'max.pdf', type: 'application/pdf', size: FILE_LIMITS.maxPdfBytes } as File
+    expect(pdfService.validatePDF(file)).toEqual({ valid: true })
   })
 
   it('processPDF: reads the file once, hands the bytes to the queue and returns the page count', async () => {
