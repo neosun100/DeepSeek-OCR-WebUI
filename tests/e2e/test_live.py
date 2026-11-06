@@ -78,9 +78,11 @@ def test_other_modes_nonempty(http: httpx.Client, mode: str) -> None:
 
 
 def test_find_mode_boxes(http: httpx.Client) -> None:
+    # 块级定位：Germany 在表格块里 ⇒ 至少命中 1 块，框落在图内
     b = ocr(http, SAMPLES / "sample.png", "find", find_term="Germany")
-    assert b["boxes"], b
-    assert any("germany" in x["label"].lower() for x in b["boxes"])
+    assert b["metadata"]["find"]["matched_blocks"] >= 1, b["warnings"]
+    assert b["boxes"] and all(x["label"] == "Germany" for x in b["boxes"])
+    assert "Germany" in b["text"]
 
 
 def test_large_photo_crops(http: httpx.Client) -> None:
@@ -89,6 +91,7 @@ def test_large_photo_crops(http: httpx.Client) -> None:
     assert b["content_chars"] > 30
 
 
+@pytest.mark.timeout(1800)  # 6 页密集表格；HF 串行单页可达 ~17 s（A10G 实测）
 def test_pdf_stream(http: httpx.Client) -> None:
     with open(SAMPLES / "sample.pdf", "rb") as f:
         r = http.post("/api/ocr/pdf", files={"file": ("s.pdf", f)}, data={"prompt_type": "document"})
@@ -99,6 +102,7 @@ def test_pdf_stream(http: httpx.Client) -> None:
     assert all(p["content_chars"] > 0 for p in pages)
 
 
+@pytest.mark.timeout(900)
 def test_synthetic_pdf_page_numbers(http: httpx.Client) -> None:
     r = http.post("/api/ocr/pdf", files={"file": ("p.pdf", pdf_bytes(3))}, data={"prompt_type": "free"})
     pages = [json.loads(x) for x in r.text.splitlines() if '"type": "page"' in x]

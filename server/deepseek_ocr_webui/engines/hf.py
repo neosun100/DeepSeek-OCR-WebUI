@@ -242,6 +242,9 @@ class HFEngine(Engine):
         dev, dtype = self.device, self.dtype
         input_ids = inp["input_ids"].unsqueeze(0).to(dev)
         prompt_len = input_ids.shape[1]
+        # 模型位置上限 8192（config.max_position_embeddings）：prompt（图像 token 可达 ~1.1k）+ 生成不能超过它
+        max_pos = int(getattr(self.model.config, "max_position_embeddings", 8192) or 8192)
+        max_tokens = max(1, min(max_tokens, max_pos - prompt_len))
         tokenizer = self.tokenizer
         every = max(16, self.repetition_check_every)
         state = {"cut": False}

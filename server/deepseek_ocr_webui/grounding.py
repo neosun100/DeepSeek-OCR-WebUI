@@ -80,3 +80,33 @@ def clean_text(raw: str) -> str:
     # 删块后留下的「块头换行」：每个块原本是 `<ref..det>\n内容`，删掉块头后行首多一个换行
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+@dataclass(frozen=True)
+class Block:
+    label: str
+    boxes: tuple[tuple[int, int, int, int], ...]
+    content: str  # 该块标记之后、下一个块标记之前的文字
+
+
+def parse_blocks(raw: str, width: int, height: int) -> list[Block]:
+    """把 document 模式输出切成版面块（标签 + 框 + 块内文字）。服务层的 find 用它做块级关键词定位。"""
+    out: list[Block] = []
+    matches = list(_BLOCK.finditer(raw or ""))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        boxes, _ = parse_boxes(raw[m.start() : m.end()], width, height)
+        content = _ORPHAN_TAGS.sub("", raw[m.end() : end]).strip()
+        label = m.group("label").strip()
+        if not is_layout_label(label):  # ocr 模式：label 本身就是文字
+            content = f"{label} {content}".strip()
+        out.append(Block(label, tuple(b.box for b in boxes), content))
+    return out
+
+
+def find_in_blocks(blocks: list[Block], term: str) -> list[Block]:
+    """块级定位：块内文字包含关键词（忽略大小写与空白差异）的块。"""
+    key = re.sub(r"\s+", "", term).casefold()
+    if not key:
+        return []
+    return [b for b in blocks if key in re.sub(r"\s+", "", b.content).casefold()]

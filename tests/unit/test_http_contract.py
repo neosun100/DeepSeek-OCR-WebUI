@@ -54,10 +54,25 @@ class TestOCRSuccess:
         post_ocr(client, prompt_type="document")
         assert "<|grounding|>" in engine.calls[-1]["prompt"]
 
-    def test_find_mode_labels_as_text(self, client: TestClient) -> None:
-        b = post_ocr(client, 999, 999, prompt_type="find", find_term="Total").json()
-        assert b["text"] == "Total"
-        assert len(b["boxes"]) == 2
+    def test_find_mode_block_level(self, client: TestClient) -> None:
+        b = post_ocr(client, 999, 999, prompt_type="find", find_term="hello deepseek").json()
+        assert b["metadata"]["find"] == {
+            "term": "hello deepseek",
+            "strategy": "layout_block_search",
+            "matched_blocks": 1,
+        }
+        assert [x["label"] for x in b["boxes"]] == ["hello deepseek"]
+        assert b["boxes"][0]["box"] == [100, 150, 900, 400]  # 命中的是 text 块，不是 title 块
+        assert "Hello DeepSeek OCR" in b["text"] and "Fake Title" not in b["text"]
+
+    def test_find_no_match_is_a_reading(self, client: TestClient) -> None:
+        b = post_ocr(client, prompt_type="find", find_term="不存在的词").json()
+        assert b["boxes"] == [] and b["ok"] is True
+        assert "find_no_match" in {w["code"] for w in b["warnings"]}
+
+    def test_find_requires_term(self, client: TestClient) -> None:
+        r = post_ocr(client, prompt_type="find")
+        assert r.status_code == 422 and r.json()["detail"]["error"] == "missing_find_term"
 
     def test_request_id_propagated(self, client: TestClient) -> None:
         r = client.post("/api/ocr", files={"file": ("x.png", png_bytes(), "image/png")},

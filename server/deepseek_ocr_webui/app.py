@@ -92,6 +92,9 @@ def _page_request(
 ) -> PageRequest:
     if prompt_type not in MODES:
         raise InputError(422, "invalid_mode", "不支持的识别模式", actual=prompt_type, limit=list(MODES))
+    if prompt_type == "find" and not find_term.strip():
+        # v4 静默默认搜 "Total"；没给关键词就是调用方错误
+        raise InputError(422, "missing_find_term", "find 模式需要 find_term（要查找的关键词）")
     if len(find_term) > MAX_FIND_TERM_CHARS:
         raise InputError(
             422, "find_term_too_long", "查找关键词过长", actual=len(find_term), limit=MAX_FIND_TERM_CHARS

@@ -26,7 +26,10 @@ MODES: dict[str, ModeSpec] = {
     "free": ModeSpec("Free OCR.", False, False, "纯文本，不保留版面"),
     "figure": ModeSpec("Parse the figure.", False, False, "图表 / 图形解析"),
     "describe": ModeSpec("Describe this image in detail.", False, False, "图像描述"),
-    "find": ModeSpec("Locate <|ref|>{term}<|/ref|> in the image.", True, False, "查找并定位关键词"),
+    # OCR-2 没有原生的「按关键词定位」：上游 README 只有 document / Free OCR 两个提示词；
+    # 2026-11-07 实测 2 张图 × 3 个词 × 2 种 Locate 写法 = 12 次全部退回文档解析（v4.0 起 find 模式实际从未生效）。
+    # ⇒ find = 带版面框的文档解析 + 服务端在版面块文字里找关键词（块级精度，见 service.py）
+    "find": ModeSpec("Convert the document to markdown.", True, False, "查找关键词（版面块级定位）"),
     "freeform": ModeSpec("{prompt}", False, True, "自定义提示词"),
 }
 
@@ -36,17 +39,15 @@ def build_prompt(
 ) -> str:
     """返回完整提示词（含 `<image>\\n` 前缀）。调用方需先保证 mode 合法、参数长度在上限内。"""
     spec = MODES[mode]
-    if mode == "find":
-        # find 模式下关键词是 <|ref|> 的内容；去掉可能伪造的特殊标记，避免把提示词结构注入进去
-        term = _strip_special(find_term).strip() or "Total"
-        body = spec.body.replace("{term}", term)
-    elif mode == "freeform":
-        body = _strip_special(custom_prompt).strip() or "OCR this image."
-    else:
-        body = spec.body
+    body = (_strip_special(custom_prompt).strip() or "OCR this image.") if mode == "freeform" else spec.body
     use_grounding = spec.grounding_default if (grounding is None or not spec.grounding_allowed) else grounding
     prefix = "<|grounding|>" if use_grounding else ""
     return f"<image>\n{prefix}{body}"
+
+
+def clean_find_term(text: str) -> str:
+    """find 关键词：去掉特殊标记与首尾空白（它只在服务端做匹配，不进模型提示词）。"""
+    return _strip_special(text).strip()
 
 
 def _strip_special(text: str) -> str:

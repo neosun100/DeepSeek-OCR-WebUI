@@ -22,9 +22,9 @@ from . import __version__
 from .config import Limits, Settings
 from .engines import Engine, EngineOOM, EngineUnavailable
 from .errors import EngineError, InputError
-from .grounding import clean_text, parse_boxes
+from .grounding import Box, clean_text, find_in_blocks, parse_blocks, parse_boxes
 from .judges import JudgeLimits, content_chars, judge_page, repetition, strip_layout
-from .prompts import build_prompt
+from .prompts import build_prompt, clean_find_term
 
 # X-Client-ID 只接受这个形状；否则当没给（防止把任意长串塞进内存字典 / 日志）
 _CLIENT_ID = re.compile(r"[A-Za-z0-9_\-]{1,64}")
@@ -258,8 +258,18 @@ class OCRService:
                 if wobj["code"] in ("repetition", "repetition_cut"):
                     wobj["trimmed_chars"] = trimmed
         display = clean_text(text_raw)
-        if not display and boxes:
-            display = ", ".join(b.label for b in boxes)  # find 模式：只有框没有正文
+        find_meta = None
+        if req.mode == "find":
+            # 服务端块级定位（OCR-2 无原生 Locate，见 prompts.py）：只返回包含关键词的版面块
+            term = clean_find_term(req.find_term)
+            hits = find_in_blocks(parse_blocks(text_raw, w, h), term)
+            boxes = [Box(term, bx) for blk in hits for bx in blk.boxes]
+            display = "\n\n".join(blk.content for blk in hits)
+            find_meta = {"term": term, "strategy": "layout_block_search", "matched_blocks": len(hits)}
+            if not hits:
+                verdict.warnings.append(
+                    {"code": "find_no_match", "message": f"页面中没有找到包含「{term}」的版面块"}
+                )
         info = self.engine.info()
         return {
             "success": True,
@@ -278,6 +288,7 @@ class OCRService:
                 "backend": info.get("device"),  # v4 字段：cuda / mps / cpu
                 "engine": info.get("engine"),
                 "has_boxes": bool(boxes),
+                "find": find_meta,
                 "tokens": {"prompt": raw.prompt_tokens, "completion": raw.completion_tokens},
                 "timing": {"queue_s": round(queue_s, 3), "infer_s": round(infer_s, 3), **raw.extra},
             },

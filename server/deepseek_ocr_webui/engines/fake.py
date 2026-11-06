@@ -82,10 +82,6 @@ class FakeEngine(Engine):
                 raise RuntimeError("fake engine exploded")
             if w == 31:
                 return RawOutput(NORMAL, "length", max_tokens)
-            if "Locate" in prompt:
-                return RawOutput(
-                    "<|ref|>Total<|/ref|><|det|>[[10, 10, 200, 60], [300, 400, 500, 450]]<|/det|>", "stop"
-                )
             if "<|grounding|>" not in prompt:
                 return RawOutput("# Fake Title\n\nHello DeepSeek OCR 你好世界 12345.", "stop", 20)
             return RawOutput(NORMAL, "stop", 42)

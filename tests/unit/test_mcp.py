@@ -55,8 +55,8 @@ def _forward(client: TestClient, req: httpx.Request) -> httpx.Response:
 def test_ocr_image_end_to_end(routed: TestClient, tmp_path) -> None:
     p = tmp_path / "a.png"
     p.write_bytes(png_bytes())
-    out = mcp_server.ocr_image(path=str(p), mode="find", find_term="Total")
-    assert out["ok"] is True and out["text"] == "Total"
+    out = mcp_server.ocr_image(path=str(p), mode="find", find_term="Hello")
+    assert out["ok"] is True and "Hello DeepSeek OCR" in out["text"] and len(out["boxes"]) == 1
 
 
 def test_ocr_image_error_passthrough(routed: TestClient, tmp_path) -> None:

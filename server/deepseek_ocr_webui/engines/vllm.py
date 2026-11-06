@@ -38,8 +38,9 @@ SERVED_NAME = "deepseek-ocr-2"
 LOGITS_PROCESSOR = "vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor"
 NGRAM_ARGS = {"ngram_size": 30, "window_size": 90, "whitelist_token_ids": [128821, 128822]}
 CUT_CHECK_EVERY_CHARS = 500
-# 生成上限 8192 + 图像 token（全局 257 + 最多 6 块局部 × 144）+ 文本 ⇒ 10240 容得下
-MANAGED_MAX_MODEL_LEN = 10240
+# = 模型 config 的 max_position_embeddings（2026-11-07 A10G 实测：设 10240 时 vLLM 拒绝启动）。
+# 图像 token（全局 257 + 最多 6 块 × 144）+ 文本 + 生成必须一起放进这 8192 里
+MANAGED_MAX_MODEL_LEN = 8192
 
 
 class VLLMEngine(Engine):
@@ -202,8 +203,10 @@ class VLLMEngine(Engine):
         url = self._pick_url()
         self._inflight[url] += 1
         try:
+            # 默认上限（= 整个上下文）不显式传：让 vLLM 用「上下文 − prompt」，否则 prompt+8192 必然超长
+            req_max = max_tokens if max_tokens < MANAGED_MAX_MODEL_LEN else None
             try:
-                return await self._stream(url, self._body(image, prompt, max_tokens), max_tokens)
+                return await self._stream(url, self._body(image, prompt, req_max), max_tokens)
             except _ContextTooLong:
                 # 外部 vLLM 的 max_model_len 可能更小：不指定 max_tokens，让 vLLM 用剩余上下文
                 logger.warning("max_tokens={} 超出 {} 的上下文长度，改为由 vLLM 自定上限", max_tokens, url)
