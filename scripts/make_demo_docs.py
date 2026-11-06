@@ -79,7 +79,8 @@ def _table(page: pymupdf.Page, y: float) -> float:
                 page.draw_rect(rect, color=(0.2, 0.3, 0.5), fill=(0.88, 0.91, 0.96), width=0.6)
             else:
                 page.draw_rect(rect, color=(0.6, 0.6, 0.6), width=0.5)
-            page.insert_textbox(rect + (5, 6, -4, 0), cell, fontname="cjk", fontsize=9.5)
+            inner = pymupdf.Rect(rect.x0 + 5, rect.y0 + 6, rect.x1 - 4, rect.y1)  # 单元格内边距
+            page.insert_textbox(inner, cell, fontname="cjk", fontsize=9.5)
             x += widths[c]
         y += row_h
     return y + 16
