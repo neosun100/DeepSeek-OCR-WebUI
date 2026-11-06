@@ -19,7 +19,10 @@
       >
         {{ $t('header.scan2Doc') }}
       </span>
-      <span class="model-badge">OCR-2</span>
+      <span
+        class="model-badge"
+        data-testid="version-badge"
+      >{{ APP_VERSION_LABEL }}</span>
     </div>
 
     <!-- Center: OCR Status & Queue -->
@@ -166,6 +169,7 @@
 </template>
 
 <script setup lang="ts">
+import { APP_VERSION_LABEL } from '@/version'
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { onClickOutside } from '@vueuse/core'

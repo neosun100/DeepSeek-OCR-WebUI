@@ -156,5 +156,51 @@ describe('OCRHealthIndicator', () => {
         const ago5min = new Date(now.getTime() - 300000)
         expect(vm.formatTime(ago5min)).toBe('health.minutesAgo')
     })
-})
 
+    describe('v5 states', () => {
+        it('shows model loading (starting) as a warning state, not unavailable', async () => {
+            const wrapper = mount(OCRHealthIndicator, globalMountOptions)
+            const store = useHealthStore()
+            store.isHealthy = true
+            store.serviceState = 'starting'
+            store.healthInfo = { status: 'starting', ready: false, backend: 'cuda', model_loaded: false } as any
+            await wrapper.vm.$nextTick()
+
+            expect(wrapper.find('.health-status').text()).toContain('health.starting')
+            expect(wrapper.find('[data-testid="health-starting-hint"]').exists()).toBe(true)
+            expect(wrapper.findComponent(NButton).props('type')).toBe('warning')
+        })
+
+        it('shows load_error when the model failed to load', async () => {
+            const wrapper = mount(OCRHealthIndicator, globalMountOptions)
+            const store = useHealthStore()
+            store.isHealthy = false
+            store.serviceState = 'error'
+            store.healthInfo = { status: 'error', load_error: 'weights missing', backend: null } as any
+            await wrapper.vm.$nextTick()
+
+            expect(wrapper.find('.health-status').text()).toContain('health.modelError')
+            expect(wrapper.find('[data-testid="health-load-error"]').exists()).toBe(true)
+            expect(wrapper.findComponent(NButton).props('type')).toBe('error')
+        })
+
+        it('shows engine device, dtype and version', async () => {
+            const wrapper = mount(OCRHealthIndicator, globalMountOptions)
+            const store = useHealthStore()
+            store.isHealthy = true
+            store.serviceState = 'ready'
+            store.healthInfo = {
+                status: 'healthy', version: '5.0.0', model_version: 'DeepSeek-OCR-2', backend: 'cuda',
+                engine: { engine: 'vllm', device: 'cuda', dtype: 'bfloat16' }, model_loaded: true
+            } as any
+            await wrapper.vm.$nextTick()
+
+            const text = wrapper.find('[data-testid="health-tooltip"]').text()
+            expect(text).toContain('5.0.0')
+            expect(text).toContain('DeepSeek-OCR-2')
+            expect(text).toContain('vllm')
+            expect(wrapper.find('[data-testid="health-device"]').text()).toContain('cuda')
+            expect(wrapper.find('[data-testid="health-device"]').text()).toContain('bfloat16')
+        })
+    })
+})

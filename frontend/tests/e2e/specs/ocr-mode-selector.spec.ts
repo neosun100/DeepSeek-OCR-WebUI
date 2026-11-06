@@ -118,44 +118,41 @@ test.describe('OCR Mode Selector - Direct Modes', () => {
         await pageViewer.waitForReady();
 
         const trigger = page.getByTestId('ocr-trigger-btn');
-        // Requests must be mocked before the first selection: selecting a
-        // mode from the dropdown runs OCR immediately (OCRModeSelector emits
-        // 'run' on select). Previously the mock was registered afterwards, so
-        // that first run went to the real network.
-        // The mock answers prompt_type 'document', so every run continues
-        // into the doc-generation pipeline (markdown -> docx -> pdf).
+        // Requests must be mocked before the first selection: selecting a mode from the
+        // dropdown runs OCR immediately. Previously the first run went to the real network.
         await apiMocks.mockOCR({ delay: 1500 });
+        const promptTypes: string[] = [];
+        page.on('request', req => {
+            if (!req.url().endsWith('/ocr') || req.method() !== 'POST') return;
+            const m = /name="prompt_type"\r\n\r\n([a-z]+)/.exec(req.postData() || '');
+            if (m?.[1]) promptTypes.push(m[1]);
+        });
 
         // Verify default is "Scan to Document"
         await expect(trigger).toContainText('Scan to Document');
 
-        // Root cause of the old flake: the next interaction started after
-        // waitForOCRSuccess, i.e. while doc generation was still running. The
-        // selector is disabled then, except in short gaps where the status
-        // reads 'completed' mid-pipeline; a click in such a gap is swallowed
-        // (menu never opens), and a run started there gets its status
-        // overwritten by the previous pipeline. Under full-suite CPU load the
-        // pipeline is slow enough to hit this. Each step therefore waits for
-        // that run's generation to finish completely.
-        const runAndSettle = async (action: () => Promise<void>) => {
+        // Root cause of the old flake (F1): page status is non-monotonic during doc
+        // generation ('completed' shows up mid-pipeline), so waiting for 'completed'
+        // is not enough — a click in such a gap is swallowed. Each step waits for that
+        // run's generation to finish completely. F2 adds: assert the prompt_type each
+        // run actually sent, so "persisted mode" is checked on the wire, not just the label.
+        const runAndSettle = async (action: () => Promise<void>, expected: string[]) => {
             const doneBefore = await ocrPage.getGenerationDoneCount(0);
             await action();
-            await expect.poll(async () => await ocrPage.getPageStatus(0), {
-                timeout: 5000
-            }).toBe('recognizing');
+            await expect.poll(() => promptTypes, { timeout: 5000 }).toEqual(expected);
             await ocrPage.waitForGenerationDone(0, doneBefore);
         };
 
-        // Selecting "General OCR" runs OCR and updates the label
-        await runAndSettle(() => pageViewer.selectOCRMode('ocr'));
+        // Selecting "General OCR" runs OCR in 'ocr' mode and updates the label
+        await runAndSettle(() => pageViewer.selectOCRMode('ocr'), ['ocr']);
         await expect(trigger).toContainText('General OCR');
 
         // Main button re-runs with the persisted mode, not the default
-        await runAndSettle(() => pageViewer.clickOCRModeMainButton());
+        await runAndSettle(() => pageViewer.clickOCRModeMainButton(), ['ocr', 'ocr']);
         await expect(trigger).toContainText('General OCR');
 
         // Switching to "Parse Figure" runs it and becomes the new main action
-        await runAndSettle(() => pageViewer.selectOCRMode('figure'));
+        await runAndSettle(() => pageViewer.selectOCRMode('figure'), ['ocr', 'ocr', 'figure']);
         await expect(trigger).toContainText('Parse Figure');
     });
 });

@@ -304,6 +304,22 @@ describe('Scan2DocDB', () => {
             // confidence check removed as per user request
         })
 
+        it('summarizes v5 warnings and tolerates legacy records without them', async () => {
+            const base = { success: true, text: 't', raw_text: 'r', boxes: [], image_dims: { w: 1, h: 1 }, prompt_type: 'document' }
+            await db.savePageOCR({
+                pageId: 'v5-page',
+                data: { ...base, ok: false, finish_reason: 'length', warnings: [{ code: 'truncated', message: 'cut' }] },
+                createdAt: new Date()
+            })
+            await db.savePageOCR({ pageId: 'v4-page', data: base, createdAt: new Date() })
+
+            expect(await db.getPageOCRSummary('v5-page')).toEqual({
+                warnings: [{ code: 'truncated', message: 'cut' }], finishReason: 'length', ok: false
+            })
+            expect(await db.getPageOCRSummary('v4-page')).toEqual({ warnings: [], finishReason: null, ok: null })
+            expect(await db.getPageOCRSummary('missing')).toBeUndefined()
+        })
+
         it('should support CRUD on pageMarkdowns', async () => {
             const pageId = 'page_md_test'
             const data: import('./index').PageMarkdown = {

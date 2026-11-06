@@ -312,4 +312,43 @@ describe('HealthCheckService', () => {
             expect(secondCheckTime!.getTime()).toBeGreaterThan(firstCheckTime!.getTime())
         })
     })
+
+    describe('v5 503 bodies', () => {
+        const res503 = (body: unknown) => ({
+            ok: false, status: 503, statusText: 'Service Unavailable', json: async () => body
+        })
+
+        it('treats 503 status=starting as starting (healthy for queueing, not ready)', async () => {
+            fetchMock.mockResolvedValueOnce(res503({ status: 'starting', ready: false, model_loaded: false, backend: 'cuda' }))
+            await service.checkNow()
+            expect(service.getServiceState()).toBe('starting')
+            expect(service.getStatus()).toBe(true)
+            expect(service.getHealthInfo()?.status).toBe('starting')
+        })
+
+        it('treats 503 status=error as model error with load_error', async () => {
+            fetchMock.mockResolvedValueOnce(res503({ status: 'error', ready: false, load_error: 'weights missing' }))
+            await service.checkNow()
+            expect(service.getServiceState()).toBe('error')
+            expect(service.getStatus()).toBe(false)
+            expect(service.getHealthInfo()?.load_error).toBe('weights missing')
+        })
+
+        it('treats 503 without a v5 body as unavailable', async () => {
+            fetchMock.mockResolvedValueOnce({ ok: false, status: 503, statusText: 'x', json: async () => { throw new Error('html') } })
+            await service.checkNow()
+            expect(service.getServiceState()).toBe('unavailable')
+            expect(service.getHealthInfo()).toBeNull()
+        })
+
+        it('treats network failure as unavailable and 200 as ready', async () => {
+            fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            await service.checkNow()
+            expect(service.getServiceState()).toBe('unavailable')
+            fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'busy', ready: true }) })
+            await service.checkNow()
+            expect(service.getServiceState()).toBe('ready')
+            expect(service.getStatus()).toBe(true)
+        })
+    })
 })

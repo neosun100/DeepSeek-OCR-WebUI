@@ -50,13 +50,14 @@
         rel="noopener"
       >cloudman6</a>
       <div class="footer-version">
-        DeepSeek-OCR-WebUI v4.1 · OCR-2 | © 2026
+        DeepSeek-OCR-WebUI {{ APP_VERSION_LABEL }} | © 2026
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { APP_VERSION_LABEL } from '@/version'
 import { NIcon, NButton } from 'naive-ui'
 import { CloudUploadOutline, AddOutline } from '@vicons/ionicons5'
 import { PRIMARY_COLOR } from '@/theme/vars'

@@ -44,6 +44,13 @@ const IGNORED_PATTERNS = [
     'Failed to load resource: Preflight response is not successful',
     'blocked by CORS policy',
     'Failed to load resource: net::ERR_FAILED',
+    // v5 contract: retry / degradation logs are expected in the scenarios that trigger them
+    '[OCRService] Network error for page', // fetch rejected (e.g. request cut when a test ends)
+    '[OCRService] OCR model is loading',
+    '[OCRService] OCR model still loading (503)',
+    '[HealthCheckService] OCR model failed to load',
+    'Failed to load resource: the server responded with a status of 503',
+    'OCR model is unavailable:',
 ];
 
 /**

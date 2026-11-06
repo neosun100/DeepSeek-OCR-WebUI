@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { findMatchingBoxIndex, normalizeBox, parseRawText, type ImageDims, type OCRBox } from './ocr-parser'
+import { findMatchingBoxIndex, normalizeBox, parseRawText, tokenizeRawText, type ImageDims, type OCRBox } from './ocr-parser'
 
 describe('ocr-parser', () => {
     describe('findMatchingBoxIndex', () => {
@@ -83,6 +83,32 @@ describe('ocr-parser', () => {
             const result = parseRawText(rawText, dims, [])
             expect(result).toHaveLength(1)
             expect(result[0]!.box).toEqual([0, 0, 20, 20])
+        })
+
+        it('should keep multi-box blocks and use the union box (issue #49)', () => {
+            const rawText = '<|ref|>text<|/ref|><|det|>[[10,10,50,20], [10,20,60,40]]<|/det|>\nTwo lines'
+            const result = parseRawText(rawText, { w: 100, h: 100 }, [])
+            expect(result).toHaveLength(1)
+            expect(result[0]!.content).toBe('Two lines')
+            expect(result[0]!.box).toEqual([10, 10, 60, 40])
+        })
+
+        it('should keep content when coordinates are unparseable', () => {
+            const result = parseRawText('<|ref|>text<|/ref|><|det|>[[oops]]<|/det|>Kept', { w: 100, h: 100 }, [])
+            expect(result).toEqual([{ type: 'text', content: 'Kept', box: [0, 0, 100, 100] }])
+        })
+
+        it('should keep ocr-mode labels as content', () => {
+            const result = parseRawText('<|ref|>Hello 42<|/ref|><|det|>[[1,2,3,4]]<|/det|>', { w: 100, h: 100 }, [])
+            expect(result[0]!.content).toBe('Hello 42')
+        })
+    })
+
+    describe('tokenizeRawText', () => {
+        it('should keep free text around blocks and strip orphan tags', () => {
+            const segs = tokenizeRawText('lead <|det|> <|ref|>title<|/ref|> <|det|>[[1,2,3,4]]<|/det|># T\ntail')
+            expect(segs.map(s => s.content)).toEqual(['lead', '# T\ntail'])
+            expect(segs[1]!.boxes).toEqual([[1, 2, 3, 4]])
         })
     })
 })

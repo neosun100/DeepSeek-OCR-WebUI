@@ -42,7 +42,16 @@ export default {
     fullTooltip: '队列已满 (无法提交)',
     queue: '排队',
     busy: '繁忙',
-    full: '已满'
+    full: '已满',
+    starting: '模型加载中',
+    startingTooltip: '模型正在加载 / 预热，新任务会排队等待并自动开始。',
+    modelError: '模型不可用',
+    modelErrorDetail: '模型不可用：{0}',
+    unreachableTooltip: '无法连接 OCR 服务（网络错误或服务未启动）。',
+    engine: '引擎',
+    device: '设备',
+    dtype: '精度',
+    version: '版本'
   },
 
   // Header
@@ -213,7 +222,8 @@ export default {
   // Page Item
   pageItem: {
     scanToDocument: '扫描为文档',
-    deletePage: '删除页面'
+    deletePage: '删除页面',
+    outputWarning: 'OCR 结果可能不可靠'
   },
 
   // OCR Queue Popover
@@ -228,7 +238,9 @@ export default {
     cancelTask: '取消任务',
     taskCancelled: '任务已取消',
     tasksCancelled: '已取消 {n} 个任务',
-    allTasksCancelled: '已取消所有任务'
+    allTasksCancelled: '已取消所有任务',
+    modelLoading: '模型加载中，排队任务将在就绪后自动开始。',
+    modelError: '模型不可用：{0}'
   },
 
   // OCR Input Modal
@@ -247,7 +259,13 @@ export default {
     copy: '复制',
     noRawText: '无原始文本',
     copied: '已复制！',
-    copyFailed: '复制失败'
+    copyFailed: '复制失败',
+    warnings: '产物检查',
+    finishReason: '结束原因',
+    finishStop: '正常结束',
+    finishLength: '达到最大长度（可能被截断）',
+    finishRepetitionCut: '检测到复读，已提前停止',
+    hint: '提示'
   },
 
   // Error messages

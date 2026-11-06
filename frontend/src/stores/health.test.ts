@@ -9,6 +9,8 @@ const { mockHealthService } = vi.hoisted(() => {
             start: vi.fn(),
             stop: vi.fn(),
             getStatus: vi.fn().mockReturnValue(true),
+            getServiceState: vi.fn().mockReturnValue('ready'),
+            checkNow: vi.fn().mockResolvedValue(undefined),
             getHealthInfo: vi.fn().mockReturnValue({ status: 'healthy' }),
             getLastCheckTime: vi.fn().mockReturnValue(new Date())
         }
@@ -204,6 +206,42 @@ describe('Health Store', () => {
         expect(store.isFull).toBe(false)
         expect(store.queuePosition).toBeNull()
     })
+
+    describe('v5 service states', () => {
+        it('exposes starting state as healthy-but-not-ready (tasks may queue)', () => {
+            mockHealthService.getStatus.mockReturnValue(true)
+            mockHealthService.getServiceState.mockReturnValue('starting')
+            mockHealthService.getHealthInfo.mockReturnValue({ status: 'starting', ready: false, version: '5.0.0' })
+            const store = useHealthStore()
+            store.startHealthCheck()
+            expect(store.isHealthy).toBe(true)
+            expect(store.isReady).toBe(false)
+            expect(store.isStarting).toBe(true)
+            expect(store.serverVersion).toBe('5.0.0')
+        })
+
+        it('exposes model load error with load_error and engine info', () => {
+            mockHealthService.getStatus.mockReturnValue(false)
+            mockHealthService.getServiceState.mockReturnValue('error')
+            mockHealthService.getHealthInfo.mockReturnValue({
+                status: 'error', load_error: 'CUDA OOM', engine: { engine: 'hf', device: 'cuda', dtype: 'bfloat16' }
+            })
+            const store = useHealthStore()
+            store.startHealthCheck()
+            expect(store.isHealthy).toBe(false)
+            expect(store.isModelError).toBe(true)
+            expect(store.loadError).toBe('CUDA OOM')
+            expect(store.engineInfo?.device).toBe('cuda')
+        })
+
+        it('checkNow runs an immediate check and refreshes state', async () => {
+            mockHealthService.getServiceState.mockReturnValue('unavailable')
+            mockHealthService.getStatus.mockReturnValue(false)
+            const store = useHealthStore()
+            store.startHealthCheck()
+            await store.checkNow()
+            expect(mockHealthService.checkNow).toHaveBeenCalled()
+            expect(store.isUnreachable).toBe(true)
+        })
+    })
 })
-
-
