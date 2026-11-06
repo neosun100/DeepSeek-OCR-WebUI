@@ -20,6 +20,9 @@ RUN npm run build
 
 # ---------------------------------------------------------------- hf (transformers)
 FROM python:3.12-slim AS hf
+# gcc：torch 的 Triton JIT 首次推理时要编译 C 启动桩；slim 镜像没有编译器 ⇒ 预热报
+# "Failed to find C compiler"（2026-11-07 A10G 真机；预热把它拦在了启动期，而不是用户的第一个请求）
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
     PATH=/app/.venv/bin:$PATH
@@ -53,9 +56,13 @@ WORKDIR /app
 # vLLM 镜像自带 torch / transformers / fastapi；只补本服务的核心依赖，--no-deps 装本包避免改动 vLLM 的版本钉
 COPY pyproject.toml README.md ./
 COPY server ./server
-RUN python3 -m pip install --no-cache-dir "loguru>=0.7.3" "pymupdf>=1.26" "pydantic-settings>=2.6" "python-multipart>=0.0.20" \
+# pip check 只比「装前 / 装后」：vLLM 官方镜像自身就有不一致（nccl、opentelemetry，2026-11-07 实测），
+# 那不是本层引入的；本层只许不新增冲突
+RUN (python3 -m pip check > /tmp/pipcheck.before 2>&1 || true) \
+ && python3 -m pip install --no-cache-dir "loguru>=0.7.3" "pymupdf>=1.26" "pydantic-settings>=2.6" "python-multipart>=0.0.20" \
  && python3 -m pip install --no-cache-dir --no-deps . \
- && python3 -m pip check
+ && (python3 -m pip check > /tmp/pipcheck.after 2>&1 || true) \
+ && if grep -vxFf /tmp/pipcheck.before /tmp/pipcheck.after | grep -v "No broken requirements"; then echo "本层引入了新的依赖冲突" >&2; exit 1; fi
 COPY --from=frontend /src/frontend/dist /app/frontend/dist
 ENV DSOCR_ENGINE=vllm \
     DSOCR_FRONTEND_DIST=/app/frontend/dist \
