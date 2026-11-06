@@ -122,38 +122,40 @@ test.describe('OCR Mode Selector - Direct Modes', () => {
         const defaultLabel = await pageViewer.getCurrentModeLabel();
         expect(defaultLabel).toContain('Scan to Document');
 
-        // Select "General OCR" from dropdown
-        await pageViewer.selectOCRMode('ocr');
-
-        // Mock OCR API (longer delay)
+        // The mode buttons stay disabled until doc generation ends, so each run waits for 'completed'.
+        // Mock OCR BEFORE selecting: picking a mode from the dropdown already runs OCR.
+        // Previously that first request was unmocked and went to the real dev API
+        // (DEV_API_BASE_URL); with v5 network-error retries (issue #47) that made this test
+        // depend on the external server.
         await apiMocks.mockOCR({ delay: 1500 });
+        const promptTypes: string[] = [];
+        page.on('request', req => {
+            if (!req.url().endsWith('/ocr') || req.method() !== 'POST') return;
+            const m = /name="prompt_type"\r\n\r\n([a-z]+)/.exec(req.postData() || '');
+            if (m?.[1]) promptTypes.push(m[1]);
+        });
 
-        // Click main button (should trigger 'ocr' mode, not 'document')
-        await pageViewer.clickOCRModeMainButton();
-
-        // Verify OCR is triggered
-        await expect.poll(async () => await ocrPage.getPageStatus(0), {
-            timeout: 5000
-        }).toBe('recognizing');
-
-        // Wait a bit for mode label to update
-        await page.waitForTimeout(500);
+        // Select "General OCR" from dropdown → runs OCR in 'ocr' mode
+        await pageViewer.selectOCRMode('ocr');
+        await expect.poll(() => promptTypes, { timeout: 5000 }).toEqual(['ocr']);
+        await expect.poll(() => ocrPage.getPageStatus(0), { timeout: 30000 }).toBe('completed');
 
         // Verify the label changed to "General OCR"
         const updatedLabel = await pageViewer.getCurrentModeLabel();
         expect(updatedLabel).toContain('General OCR');
 
-        // Wait for OCR to complete
-        await ocrPage.waitForOCRSuccess(0);
+        // Click main button (should reuse the persisted 'ocr' mode, not 'document')
+        await pageViewer.clickOCRModeMainButton();
+        await expect.poll(() => promptTypes, { timeout: 5000 }).toEqual(['ocr', 'ocr']);
+        await expect.poll(() => ocrPage.getPageStatus(0), { timeout: 30000 }).toBe('completed');
 
         // Now switch to "Parse Figure"
         await pageViewer.selectOCRMode('figure');
+        await expect.poll(() => promptTypes, { timeout: 5000 }).toEqual(['ocr', 'ocr', 'figure']);
 
-        // Click main button again
-        await pageViewer.clickOCRModeMainButton();
-
-        // Should trigger figure mode
+        // Should show figure mode
         const finalLabel = await pageViewer.getCurrentModeLabel();
         expect(finalLabel).toContain('Parse Figure');
+        await expect.poll(() => ocrPage.getPageStatus(0), { timeout: 30000 }).toBe('completed');
     });
 });
