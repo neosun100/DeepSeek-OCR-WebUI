@@ -1,0 +1,68 @@
+name: Release images (GHCR)
+
+# 打 tag v* 时构建并推送两个镜像到 ghcr.io/<owner>/deepseek-ocr-webui：
+#   :<version> / :latest          —— vLLM 引擎（默认）
+#   :<version>-hf / :latest-hf    —— transformers 引擎
+# 用 GitHub 内置的 GITHUB_TOKEN（packages: write）推送：不需要任何外部令牌。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "镜像版本号（不含 v），如 5.0.0"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: vllm
+            suffix: ""
+          - target: hf
+            suffix: "-hf"
+    runs-on: ubuntu-latest
+    steps:
+      # vLLM 基础镜像解压后 ~20 GB，默认 runner 只剩 ~14 GB ⇒ 先腾空间
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}  # 经 env 传入，不直接插进 shell（防注入）
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then v="$INPUT_VERSION"; else v="${GITHUB_REF_NAME#v}"; fi
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then echo "非法版本号：$v" >&2; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/deepseek-ocr-webui" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}${{ matrix.suffix }}
+            ${{ steps.v.outputs.image }}:latest${{ matrix.suffix }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            org.opencontainers.image.description=DeepSeek-OCR-2 WebUI (${{ matrix.target }} engine)
+            org.opencontainers.image.licenses=MIT
