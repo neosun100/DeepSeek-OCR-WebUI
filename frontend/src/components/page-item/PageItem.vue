@@ -144,22 +144,53 @@
         >
           OCR
         </NTag>
+        <NTooltip
+          v-if="failingWarnings.length > 0"
+          placement="right"
+        >
+          <template #trigger>
+            <span
+              class="output-warning"
+              data-testid="page-output-warning"
+              :aria-label="t('pageItem.outputWarning')"
+            >
+              <NIcon
+                size="16"
+                color="#f0a020"
+              >
+                <WarningOutline />
+              </NIcon>
+            </span>
+          </template>
+          <div class="output-warning-tooltip">
+            <strong>{{ t('pageItem.outputWarning') }}</strong>
+            <div
+              v-for="w in failingWarnings"
+              :key="w.code"
+              data-testid="page-output-warning-item"
+            >
+              {{ w.message }}
+            </div>
+          </div>
+        </NTooltip>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton, NTag, NCheckbox, NSpin, NIcon, useMessage, useNotification, useDialog } from 'naive-ui'
-import { TrashOutline, DocumentTextOutline, Trash, DocumentText } from '@vicons/ionicons5'
+import { NButton, NTag, NCheckbox, NSpin, NIcon, NTooltip, useMessage, useNotification, useDialog } from 'naive-ui'
+import { TrashOutline, DocumentTextOutline, Trash, DocumentText, WarningOutline } from '@vicons/ionicons5'
 import { usePagesStore } from '@/stores/pages'
 import type { Page } from '@/stores/pages'
 import { db } from '@/db'
 import { ocrService } from '@/services/ocr'
 import { PRIMARY_COLOR } from '@/theme/vars'
 import { useHealthStore } from '@/stores/health'
+import { isFailingWarning, type OCRWarning } from '@/services/ocr/types'
+import { uiLogger } from '@/utils/logger'
 
 interface Props {
   page: Page
@@ -197,6 +228,37 @@ const isScanning = computed(() => {
 })
 
 const isActionHovered = computed(() => isDeleteHovered.value || isScanHovered.value)
+
+// Output-check warnings of the stored OCR result (v5). Only failing codes get a badge;
+// near_empty / bbox_invalid are informational and shown in the raw text panel only.
+const POST_OCR_STATUSES: ReadonlySet<Page['status']> = new Set([
+  'ocr_success', 'pending_gen', 'generating_markdown', 'markdown_success',
+  'generating_pdf', 'pdf_success', 'generating_docx', 'completed'
+])
+const ocrWarnings = ref<OCRWarning[]>([])
+const failingWarnings = computed(() => ocrWarnings.value.filter(isFailingWarning))
+
+async function loadOCRWarnings(pageId: string, status: Page['status']) {
+  if (!POST_OCR_STATUSES.has(status)) {
+    ocrWarnings.value = []
+    return
+  }
+  try {
+    const summary = await db.getPageOCRSummary(pageId)
+    // Ignore a stale response if the item was recycled for another page meanwhile
+    if (props.page.id === pageId) ocrWarnings.value = summary?.warnings ?? []
+  } catch (error) {
+    // Badge is advisory: log and show none rather than breaking the list item
+    uiLogger.warn(`[PageItem] Failed to load OCR warnings for ${pageId}`, error)
+    ocrWarnings.value = []
+  }
+}
+
+watch(
+  () => [props.page.id, props.page.status] as const,
+  ([id, status]) => { void loadOCRWarnings(id, status) },
+  { immediate: true }
+)
 
 // Computed property for selection state
 const isSelected = computed(() =>
@@ -311,6 +373,19 @@ function getStatusType(status: Page['status']): 'success' | 'info' | 'warning' |
 </script>
 
 <style scoped>
+.output-warning {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  cursor: help;
+}
+
+.output-warning-tooltip {
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .page-item {
   display: flex;
   /* Layout & Box Model */

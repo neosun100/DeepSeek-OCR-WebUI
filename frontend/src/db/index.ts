@@ -2,6 +2,7 @@ import Dexie, { type EntityTable, type Transaction } from 'dexie'
 import type { PageProcessingLog, PageOutput } from '@/stores/pages'
 import { isWebkit } from '@/utils/browser'
 import { getRandomId } from '@/utils/crypto'
+import { normalizeWarnings, type OCRWarning } from '@/services/ocr/types'
 
 export interface DBFile {
   id?: string
@@ -49,6 +50,12 @@ export interface PageOCR {
   pageId: string
   data: import('@/services/ocr').OCRResult
   createdAt: Date
+}
+
+export interface PageOCRSummary {
+  warnings: OCRWarning[]
+  finishReason: string | null
+  ok: boolean | null
 }
 
 export interface PageMarkdown {
@@ -190,6 +197,21 @@ export class Scan2DocDB extends Dexie {
 
   async getPageOCR(pageId: string): Promise<PageOCR | undefined> {
     return await this.pageOCRs.get(pageId)
+  }
+
+  /**
+   * Output-check summary of a page's OCR result (v5 warnings / finish_reason).
+   * No schema change: warnings live inside pageOCRs.data. Records saved by v4 or before v5
+   * have no warnings and yield an empty list.
+   */
+  async getPageOCRSummary(pageId: string): Promise<PageOCRSummary | undefined> {
+    const record = await this.pageOCRs.get(pageId)
+    if (!record) return undefined
+    return {
+      warnings: normalizeWarnings(record.data?.warnings),
+      finishReason: record.data?.finish_reason ?? null,
+      ok: typeof record.data?.ok === 'boolean' ? record.data.ok : null
+    }
   }
 
   // Generated Documents methods
