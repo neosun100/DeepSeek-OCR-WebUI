@@ -644,6 +644,25 @@ describe('App.vue', () => {
       expect(mockMessage.error).not.toHaveBeenCalled()
     })
 
+    it('shows backend API errors even when their message says "unavailable" (#39)', async () => {
+      const { ocrEvents } = await import('./services/ocr/events')
+
+      mockStore.pages = [{ id: 'p1', fileName: 'test.png' }]
+
+      mountApp()
+      await flushPromises()
+
+      const ocrErrorCall = vi.mocked(ocrEvents.on).mock.calls.find(call => (call[0] as any) === 'ocr:error')
+      const handler = ocrErrorCall![1] as any
+
+      handler({ pageId: 'p1', error: new Error('OCR API Error: 503: backend unavailable: CUDA lost') })
+      expect(mockMessage.error).toHaveBeenCalledWith(expect.stringContaining('CUDA lost'))
+
+      mockMessage.error.mockClear()
+      handler({ pageId: 'p1', error: new Error('OCR service is currently unavailable. Please try again later.') })
+      expect(mockMessage.error).not.toHaveBeenCalled()
+    })
+
     it('handles doc:gen:error event', async () => {
       const { ocrEvents } = await import('./services/ocr/events')
 

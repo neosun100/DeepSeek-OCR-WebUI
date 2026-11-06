@@ -504,9 +504,13 @@ onMounted(async () => {
 
   // Add global error notifications for OCR and DocGen
   ocrEvents.on('ocr:error', ({ pageId, error }) => {
-    // Skip toast if it is a service unavailable error, as components will handle this with dialogs
+    // Skip toast only for the client-side pre-check rejections (OCRService.queueOCR), which the
+    // components already show as dialogs. Backend errors are prefixed "OCR API Error:" and must be
+    // shown even if the backend message contains "unavailable" (issue #39).
     const errorMsg = error?.message || 'Unknown error'
-    if (errorMsg.toLowerCase().includes('unavailable') || errorMsg.toLowerCase().includes('queue is full')) {
+    const lower = errorMsg.toLowerCase()
+    const isApiError = errorMsg.startsWith('OCR API Error:')
+    if (!isApiError && (lower.includes('unavailable') || lower.includes('queue is full'))) {
       return
     }
 
