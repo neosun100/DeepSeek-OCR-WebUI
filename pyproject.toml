@@ -37,10 +37,11 @@ hf = [
 ]
 # vLLM 路径（仅 Linux + NVIDIA）：上游 vLLM 原生支持 DeepSeek-OCR-2（≥0.16），自带 transformers 版本
 vllm = ["vllm>=0.16"]
-mcp = ["mcp>=1.2"]
+mcp = ["mcp>=2.3,<3"]
 
 [project.scripts]
 deepseek-ocr-webui = "deepseek_ocr_webui.__main__:main"
+deepseek-ocr-webui-mcp = "deepseek_ocr_webui.mcp_server:main"
 
 [dependency-groups]
 dev = [

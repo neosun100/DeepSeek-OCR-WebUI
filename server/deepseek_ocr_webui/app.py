@@ -39,6 +39,14 @@ from .service import OCRService, PageRequest, new_request_id, valid_client_id
 
 HEARTBEAT_S = 15.0
 
+# /api/ocr 的表单字段（MCP 客户端按它组请求）；与 OpenAPI 实际生成的字段一致由合同测试核验
+OCR_FORM_FIELDS = ("file", "prompt_type", "find_term", "custom_prompt", "grounding")
+
+
+def api_form_fields() -> tuple[str, ...]:
+    return OCR_FORM_FIELDS
+
+
 # 表单参数类型别名（模块级：from __future__ annotations 下 FastAPI 按名字在模块全局里解析注解）
 form_file = Annotated[UploadFile, File(description="图片文件")]
 form_mode = Annotated[str, Form(description="识别模式")]
