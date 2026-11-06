@@ -1,23 +1,55 @@
 import * as pdfjsLib from 'pdfjs-dist'
-import { CMAP_URL, CMAP_PACKED, STANDARD_FONT_DATA_URL } from '../services/pdf/config'
+import {
+  CMAP_URL,
+  CMAP_PACKED,
+  STANDARD_FONT_DATA_URL,
+  PAGE_RENDER_CONFIG,
+  computeRenderScale,
+  imageMimeType,
+  type PageImageFormat
+} from '../services/pdf/config'
 import { workerLogger } from '@/utils/logger'
 
 // Configure worker
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
-interface PDFRenderMessage {
+/**
+ * Protocol (main thread <-> render worker)
+ *
+ *   open   { docId, pdfData }  -> opened { docId, numPages, sampleText } | open-error { docId, error }
+ *          pdfData MUST be sent in the transfer list: the bytes cross the thread boundary once.
+ *   render { docId, pageId, pageNumber, ... } -> started, then a PDFRenderResult | error
+ *          Uses the cached PDFDocumentProxy; no PDF bytes travel per page.
+ *   close  { docId }           -> closed { docId }  (destroys the cached document)
+ */
+export interface OpenMessage {
+  type: 'open'
+  payload: { docId: string; pdfData: ArrayBuffer }
+}
+
+export interface RenderMessage {
   type: 'render'
   payload: {
-    pdfData: ArrayBuffer
+    docId: string
     pageId: string
     pageNumber: number
+    /** Fixed scale; when omitted the scale is derived from targetLongEdgePx */
     scale?: number
-    imageFormat?: 'png' | 'jpeg'
+    targetLongEdgePx?: number
+    maxScale?: number
+    imageFormat?: PageImageFormat
     quality?: number
     fallbackFontFamily?: string
   }
 }
+
+export interface CloseMessage {
+  type: 'close'
+  payload: { docId: string }
+}
+
+type WorkerMessage = OpenMessage | RenderMessage | CloseMessage
 
 interface PDFRenderResult {
   pageId: string
@@ -28,21 +60,11 @@ interface PDFRenderResult {
   fileSize: number
 }
 
-interface PDFErrorMessage {
-  pageId: string
-  error: string
-}
+/** Number of leading pages whose text is sampled for the main-thread fallback-font choice */
+const FONT_SAMPLE_PAGES = 3
 
-interface WorkerStartedMessage {
-  type: 'started'
-  payload: {
-    pageId: string
-    pageNumber: number
-  }
-}
-
-type WorkerMessage = PDFRenderMessage
-type WorkerResponse = PDFRenderResult | WorkerStartedMessage | { type: 'error'; payload: PDFErrorMessage }
+// docId -> loading/loaded document. Holding the promise lets renders queue behind an open.
+const documents = new Map<string, Promise<pdfjsLib.PDFDocumentProxy>>()
 
 // Polyfill global document for PDF.js internals that expect it even in workers
 /* v8 ignore start */
@@ -109,55 +131,56 @@ class OffscreenCanvasFactory {
 
 // Worker implementation
 self.addEventListener('message', async (event: MessageEvent<WorkerMessage>) => {
-  const { type, payload } = event.data
-
-  if (type !== 'render') {
-    return
-  }
-
-  try {
-    const result = await renderPage(payload)
-    self.postMessage(result)
-  } catch (error) {
-    workerLogger.error('PDF rendering error:', error)
-
-    const errorPageId = payload?.pageId || 'unknown'
-    const errorResponse: WorkerResponse = {
-      type: 'error',
-      payload: {
-        pageId: errorPageId,
-        error: error instanceof Error ? error.message : 'Unknown rendering error'
-      }
-    }
-    self.postMessage(errorResponse)
+  const message = event.data
+  switch (message?.type) {
+    case 'open':
+      await handleOpen(message.payload)
+      return
+    case 'render':
+      await handleRender(message.payload)
+      return
+    case 'close':
+      await closeDocument(message.payload?.docId)
+      self.postMessage({ type: 'closed', payload: { docId: message.payload?.docId } })
+      return
+    default:
+      return
   }
 })
 
-/**
- * Main rendering logic for a single PDF page
- */
-async function renderPage(payload: PDFRenderMessage['payload']): Promise<PDFRenderResult> {
-  const {
-    pdfData,
-    pageId,
-    pageNumber,
-    scale = 2.5,
-    imageFormat = 'png',
-    quality = 0.95,
-    fallbackFontFamily
-  } = payload
-
-  validateRenderInputs(payload)
-
-  // Notify main thread that rendering is starting
-  self.postMessage({
-    type: 'started',
-    payload: {
-      pageId,
-      pageNumber
+async function handleOpen(payload: OpenMessage['payload']): Promise<void> {
+  const docId = payload?.docId
+  try {
+    if (!docId) throw new Error('docId is required')
+    if (!payload.pdfData || payload.pdfData.byteLength === 0) {
+      throw new Error('pdfData is empty or invalid')
     }
-  })
+    // Re-opening the same id replaces the previous document (e.g. resume after a reload)
+    await closeDocument(docId)
 
+    const loading = loadDocument(payload.pdfData)
+    documents.set(docId, loading)
+    let pdfDocument: pdfjsLib.PDFDocumentProxy
+    try {
+      pdfDocument = await loading
+    } catch (error) {
+      documents.delete(docId)
+      throw error
+    }
+
+    const sampleText = await extractSampleText(pdfDocument)
+    self.postMessage({ type: 'opened', payload: { docId, numPages: pdfDocument.numPages, sampleText } })
+  } catch (error) {
+    workerLogger.error('PDF open error:', error)
+    self.postMessage({
+      type: 'open-error',
+      payload: { docId: docId || 'unknown', error: error instanceof Error ? error.message : 'Unknown open error' }
+    })
+  }
+}
+
+function loadDocument(pdfData: ArrayBuffer): Promise<pdfjsLib.PDFDocumentProxy> {
+  // pdf.js takes ownership of the bytes (it may transfer them to its own parser thread)
   const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(pdfData),
     cMapUrl: CMAP_URL,
@@ -171,11 +194,94 @@ async function renderPage(payload: PDFRenderMessage['payload']): Promise<PDFRend
     verbosity: 0
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any)
+  return loadingTask.promise
+}
 
-  const pdfDocument = await loadingTask.promise
+/**
+ * Text of the first pages, used on the main thread to pick a fallback font (needs `document`
+ * for font detection, so only the text crosses back). Failures only degrade the font choice.
+ */
+async function extractSampleText(pdfDocument: pdfjsLib.PDFDocumentProxy): Promise<string> {
+  let text = ''
+  const pages = Math.min(pdfDocument.numPages, FONT_SAMPLE_PAGES)
+  for (let pageNumber = 1; pageNumber <= pages; pageNumber++) {
+    try {
+      const page = await pdfDocument.getPage(pageNumber)
+      const content = await page.getTextContent()
+      for (const item of content.items) {
+        if ('str' in item && item.str) text += item.str + ' '
+      }
+      page.cleanup()
+    } catch (error) {
+      workerLogger.warn(`Font sample: failed to read text of page ${pageNumber}:`, error)
+    }
+  }
+  return text
+}
 
+async function closeDocument(docId: string | undefined): Promise<void> {
+  if (!docId) return
+  const loading = documents.get(docId)
+  if (!loading) return
+  documents.delete(docId)
   try {
-    const page = await pdfDocument.getPage(pageNumber)
+    const pdfDocument = await loading
+    await pdfDocument.destroy()
+  } catch (error) {
+    // Either the open already failed (reported via open-error) or destroy failed; nothing to free
+    workerLogger.warn(`Closing document ${docId} failed:`, error)
+  }
+}
+
+async function handleRender(payload: RenderMessage['payload']): Promise<void> {
+  try {
+    const result = await renderPage(payload)
+    self.postMessage(result)
+  } catch (error) {
+    workerLogger.error('PDF rendering error:', error)
+    self.postMessage({
+      type: 'error',
+      payload: {
+        pageId: payload?.pageId || 'unknown',
+        error: error instanceof Error ? error.message : 'Unknown rendering error'
+      }
+    })
+  }
+}
+
+/**
+ * Main rendering logic for a single PDF page
+ */
+async function renderPage(payload: RenderMessage['payload']): Promise<PDFRenderResult> {
+  const {
+    docId,
+    pageId,
+    pageNumber,
+    imageFormat = PAGE_RENDER_CONFIG.imageFormat,
+    quality = PAGE_RENDER_CONFIG.quality,
+    fallbackFontFamily
+  } = payload
+
+  validateRenderInputs(payload)
+
+  const loading = documents.get(docId)
+  if (!loading) {
+    throw new Error(`Document ${docId} is not open in the render worker`)
+  }
+
+  // Notify main thread that rendering is starting
+  self.postMessage({
+    type: 'started',
+    payload: {
+      pageId,
+      pageNumber
+    }
+  })
+
+  const pdfDocument = await loading
+  const page = await pdfDocument.getPage(pageNumber)
+  try {
+    const scale = payload.scale ?? resolveScale(page, payload)
     const viewport = page.getViewport({ scale })
 
     // Create and configure canvas
@@ -193,24 +299,21 @@ async function renderPage(payload: PDFRenderMessage['payload']): Promise<PDFRend
         canvasContext: context as unknown as CanvasRenderingContext2D,
         viewport: viewport,
         intent: 'print',
-         
+
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         canvasFactory: new OffscreenCanvasFactory() as any
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any).promise)
     }
 
-    const mimeType = imageFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
     const blob = await canvas.convertToBlob({
-      type: mimeType,
+      type: imageMimeType(imageFormat),
       quality: imageFormat === 'jpeg' ? quality : undefined
     })
 
-    try {
-      page.cleanup()
-    } catch (e) {
-      workerLogger.warn('Page cleanup failed:', e)
-    }
+    // Free the backing store now rather than at GC time (matters for long documents)
+    canvas.width = 0
+    canvas.height = 0
 
     return {
       pageId,
@@ -221,18 +324,30 @@ async function renderPage(payload: PDFRenderMessage['payload']): Promise<PDFRend
       fileSize: blob.size
     }
   } finally {
-    await pdfDocument.destroy().catch(() => { })
+    try {
+      page.cleanup()
+    } catch (e) {
+      workerLogger.warn('Page cleanup failed:', e)
+    }
   }
 }
 
-function validateRenderInputs(payload: PDFRenderMessage['payload']): void {
+function resolveScale(page: pdfjsLib.PDFPageProxy, payload: RenderMessage['payload']): number {
+  const base = page.getViewport({ scale: 1 })
+  return computeRenderScale(
+    base.width,
+    base.height,
+    payload.targetLongEdgePx ?? PAGE_RENDER_CONFIG.targetLongEdgePx,
+    payload.maxScale ?? PAGE_RENDER_CONFIG.maxScale
+  )
+}
+
+function validateRenderInputs(payload: RenderMessage['payload']): void {
   if (!payload.pageId) throw new Error('pageId is required')
   if (!payload.pageNumber || payload.pageNumber < 1) {
     throw new Error(`Invalid pageNumber: ${payload.pageNumber}`)
   }
-  if (!payload.pdfData || payload.pdfData.byteLength === 0) {
-    throw new Error('pdfData is empty or invalid')
-  }
+  if (!payload.docId) throw new Error('docId is required')
 }
 
 function configureRenderContext(canvas: OffscreenCanvas, scale: number, fallbackFontFamily?: string) {

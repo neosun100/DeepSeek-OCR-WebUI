@@ -7,7 +7,6 @@ import { db } from '@/db/index'
 vi.mock('@/services/pdf', () => ({
     pdfService: {
         validatePDF: vi.fn(),
-        getPDFMetadata: vi.fn(),
         processPDF: vi.fn()
     }
 }))
@@ -38,8 +37,7 @@ describe('FileAddService', () => {
 
         // Setup default mock implementations
         vi.mocked(pdfService.validatePDF).mockReturnValue({ valid: true })
-        vi.mocked(pdfService.getPDFMetadata).mockResolvedValue({ pageCount: 2 })
-        vi.mocked(pdfService.processPDF).mockResolvedValue(undefined as any)
+        vi.mocked(pdfService.processPDF).mockResolvedValue(2)
         vi.mocked(db.savePageImage).mockResolvedValue(undefined as any)
 
         // Reset URL.createObjectURL
@@ -189,7 +187,7 @@ describe('FileAddService', () => {
 
     it('should throw error when PDF validation fails', async () => {
         const { pdfService } = await import('@/services/pdf')
-        vi.mocked(pdfService.validatePDF).mockReturnValue({ valid: false, error: 'Invalid PDF structure' })
+        vi.mocked(pdfService.processPDF).mockRejectedValue(new Error('Invalid PDF structure'))
         const mockFile = new File([''], 'bad.pdf', { type: 'application/pdf' })
         const result = await fileAddService.processFiles([mockFile])
         expect(result.success).toBe(false)
@@ -198,7 +196,7 @@ describe('FileAddService', () => {
 
     it('should throw error when PDF page count is 0', async () => {
         const { pdfService } = await import('@/services/pdf')
-        vi.mocked(pdfService.getPDFMetadata).mockResolvedValue({ pageCount: 0 })
+        vi.mocked(pdfService.processPDF).mockResolvedValue(0)
         const mockFile = new File([''], 'empty.pdf', { type: 'application/pdf' })
         const result = await fileAddService.processFiles([mockFile])
         expect(result.success).toBe(false)

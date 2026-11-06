@@ -5,9 +5,18 @@ import type { DBPage } from '@/db/index'
 import { enhancedPdfRenderer } from './enhancedPdfRenderer'
 import { queueLogger } from '@/utils/logger'
 import { getRandomId } from '@/utils/crypto'
+import { PAGE_RENDER_CONFIG, imageExtension, imageMimeType } from './config'
 
-// PDF source data cache to avoid memory overhead of per-page copies
-export const pdfSourceCache = new Map<string, { data: ArrayBuffer; totalPages: number; processedCount: number }>()
+/**
+ * Open PDF sources. The PDF bytes themselves live only inside the render worker (transferred
+ * once on open); the main thread keeps bookkeeping so it knows when to close the document.
+ */
+interface PDFSource {
+  totalPages: number
+  processedCount: number
+  fallbackFont: string
+}
+export const pdfSourceCache = new Map<string, PDFSource>()
 
 // PDF page render task interface
 interface PDFRenderTask {
@@ -28,6 +37,24 @@ let workerInstance: Worker | null = null
 let renderingTasks = new Map<string, PDFRenderTask>()
 
 /**
+ * Renders awaiting a worker reply. The queue task awaits this promise, so only one page is in
+ * flight at a time (backpressure). Without it every page was posted to the worker at once and
+ * rendered concurrently - N canvases plus N copies of the PDF alive at the same time.
+ */
+interface PendingRender {
+  settle: () => void
+  timer: ReturnType<typeof setTimeout>
+}
+const pendingRenders = new Map<string, PendingRender>()
+
+interface OpenedDocument { numPages: number; sampleText: string }
+interface PendingOpen {
+  resolve: (doc: OpenedDocument) => void
+  reject: (error: Error) => void
+}
+const pendingOpens = new Map<string, PendingOpen>()
+
+/**
  * Initialize PDF render worker
  */
 function getWorker(): Worker {
@@ -46,10 +73,65 @@ function getWorker(): Worker {
         file: new File([], 'unknown.pdf'),
         error: `Worker error: ${error.message}`
       })
+      failPendingWork(`Worker error: ${error.message}`)
     })
   }
 
   return workerInstance
+}
+
+/**
+ * A crashed worker never answers: fail everything in flight instead of waiting for timeouts.
+ */
+function failPendingWork(reason: string): void {
+  for (const [docId, pending] of pendingOpens) {
+    pendingOpens.delete(docId)
+    pending.reject(new Error(reason))
+  }
+  for (const pageId of [...pendingRenders.keys()]) {
+    void handleRenderError(pageId, reason)
+  }
+}
+
+/**
+ * Hand the PDF bytes to the worker (transferred, not copied) and wait until it has parsed them.
+ * After this call `pdfData` is detached on the main thread.
+ */
+export function openDocumentInWorker(docId: string, pdfData: ArrayBuffer): Promise<OpenedDocument> {
+  return new Promise((resolve, reject) => {
+    pendingOpens.set(docId, { resolve, reject })
+    getWorker().postMessage({ type: 'open', payload: { docId, pdfData } }, [pdfData])
+  })
+}
+
+/**
+ * Release the worker-side PDFDocumentProxy for a source
+ */
+function closeDocumentInWorker(docId: string): void {
+  if (!workerInstance) return
+  workerInstance.postMessage({ type: 'close', payload: { docId } })
+}
+
+/**
+ * Resolves once the worker's reply for this page has been fully handled (success or error).
+ * A page that never comes back is failed after renderTimeoutMs so the queue cannot stall.
+ */
+function waitForRender(pageId: string): Promise<void> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      const seconds = Math.round(PAGE_RENDER_CONFIG.renderTimeoutMs / 1000)
+      void handleRenderError(pageId, `Render timed out after ${seconds}s`)
+    }, PAGE_RENDER_CONFIG.renderTimeoutMs)
+    pendingRenders.set(pageId, { settle: resolve, timer })
+  })
+}
+
+function settlePendingRender(pageId: string): void {
+  const pending = pendingRenders.get(pageId)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingRenders.delete(pageId)
+  pending.settle()
 }
 
 /**
@@ -65,6 +147,22 @@ function handleWorkerMessage(event: MessageEvent) {
 
   if (response.type === 'error') {
     handleRenderError(response.payload.pageId, response.payload.error)
+    return
+  }
+
+  if (response.type === 'opened' || response.type === 'open-error') {
+    const pending = pendingOpens.get(response.payload.docId)
+    if (!pending) return
+    pendingOpens.delete(response.payload.docId)
+    if (response.type === 'opened') {
+      pending.resolve({ numPages: response.payload.numPages, sampleText: response.payload.sampleText || '' })
+    } else {
+      pending.reject(new Error(response.payload.error))
+    }
+    return
+  }
+
+  if (response.type === 'closed') {
     return
   }
 
@@ -197,7 +295,9 @@ async function handleRenderSuccess(
 
   } catch (error) {
     queueLogger.error(`[PDF Error] Error handling render success for ${pageId}:`, error)
-    handleRenderError(pageId, error instanceof Error ? error.message : 'Unknown error')
+    await handleRenderError(pageId, error instanceof Error ? error.message : 'Unknown error')
+  } finally {
+    settlePendingRender(pageId)
   }
 }
 
@@ -264,6 +364,8 @@ async function handleRenderError(pageId: string, errorMessage: string): Promise<
 
   } catch (error) {
     queueLogger.error(`[PDF Error] Error handling render error for ${pageId}:`, error)
+  } finally {
+    settlePendingRender(pageId)
   }
 }
 
@@ -345,9 +447,9 @@ function cleanupSourceCache(sourceId: string): void {
     source.processedCount++
     if (source.processedCount >= source.totalPages) {
       pdfSourceCache.delete(sourceId)
-      // Also destroy the cached PDF.js document handle to free memory
-      enhancedPdfRenderer.destroyDocument(sourceId)
-      queueLogger.info(`[Cleanup] All pages for source ${sourceId} processed. Cache and document cleared.`)
+      // Destroy the worker-side PDFDocumentProxy (it holds the parsed PDF and its bytes)
+      closeDocumentInWorker(sourceId)
+      queueLogger.info(`[Cleanup] All pages for source ${sourceId} processed. Document closed in worker.`)
     }
   }
 }
@@ -436,7 +538,7 @@ async function renderPDFPage(task: PDFRenderTask): Promise<void> {
     const page = await db.getPage(task.pageId)
     if (!page) {
       queueLogger.warn(`[PDF Render] Page ${task.pageId} no longer in database. Skipping render.`)
-      handleRenderError(task.pageId, 'Page deleted before rendering started')
+      await handleRenderError(task.pageId, 'Page deleted before rendering started')
       return
     }
 
@@ -456,32 +558,28 @@ async function renderPDFPage(task: PDFRenderTask): Promise<void> {
       level: 'info'
     })
 
-    // Get PDF data from cache
+    // The document must already be open in the worker (see queuePDFPages / resumeFileGroup)
     const source = pdfSourceCache.get(task.sourceId)
     if (!source) {
-      throw new Error(`PDF source data not found in cache for sourceId: ${task.sourceId}`)
+      throw new Error(`PDF source not open for sourceId: ${task.sourceId}`)
     }
 
-    // Create a fresh copy of PDF data for this rendering attempt to avoid detachment issues
-    const pdfDataCopy = source.data.slice(0)
-
-    // Get Optimal fallback font for the document (cached)
-    const fallbackFont = await enhancedPdfRenderer.getOptimalFallbackFont(pdfDataCopy, task.sourceId)
-
-    // Send to worker for isolated rendering
-    const worker = getWorker()
-    worker.postMessage({
+    // Wait for the worker's reply so only one page is in flight (backpressure)
+    const done = waitForRender(task.pageId)
+    getWorker().postMessage({
       type: 'render',
       payload: {
-        pdfData: pdfDataCopy,
+        docId: task.sourceId,
         pageId: task.pageId,
         pageNumber: task.pageNumber,
-        scale: 2.5,
-        imageFormat: 'png',
-        quality: 0.95,
-        fallbackFontFamily: fallbackFont
+        targetLongEdgePx: PAGE_RENDER_CONFIG.targetLongEdgePx,
+        maxScale: PAGE_RENDER_CONFIG.maxScale,
+        imageFormat: PAGE_RENDER_CONFIG.imageFormat,
+        quality: PAGE_RENDER_CONFIG.quality,
+        fallbackFontFamily: source.fallbackFont
       }
     })
+    await done
 
   } catch (error) {
     queueLogger.error(`[PDF Render] Error rendering PDF page ${task.pageId}:`, error)
@@ -490,23 +588,32 @@ async function renderPDFPage(task: PDFRenderTask): Promise<void> {
 }
 
 /**
- * Queue all pages from a PDF file
+ * Open a PDF in the render worker and queue all of its pages.
+ *
+ * `pdfData` is transferred to the worker (detached here afterwards) and parsed exactly once;
+ * every page render reuses that document. Returns the page count. Throws if the PDF cannot be
+ * opened or the pages cannot be stored - nothing is left open in that case.
  */
 export async function queuePDFPages(
   file: File,
   pdfData: ArrayBuffer,
-  pageCount: number,
   fileId?: string
-): Promise<void> {
-  try {
-    // Generate a source ID for the cache (prefer fileId if available)
-    const sourceId = fileId || `src_${getRandomId()}`
+): Promise<number> {
+  // Generate a source ID for the cache (prefer fileId if available)
+  const sourceId = fileId || `src_${getRandomId()}`
 
-    // Cache the PDF data once for all pages of this file
+  const opened = await openDocumentInWorker(sourceId, pdfData)
+  const pageCount = opened.numPages
+
+  try {
+    if (pageCount === 0) {
+      throw new Error('PDF file appears to be empty or corrupted')
+    }
+
     pdfSourceCache.set(sourceId, {
-      data: pdfData,
       totalPages: pageCount,
-      processedCount: 0
+      processedCount: 0,
+      fallbackFont: enhancedPdfRenderer.pickFallbackFont(opened.sampleText)
     })
 
     // Create pages for each PDF page - Orders will be assigned atomically in savePagesBatch
@@ -540,12 +647,12 @@ export async function queuePDFPages(
       totalPages: pageCount
     })
 
+    return pageCount
   } catch (error) {
     queueLogger.error('Error queueing PDF pages:', error)
-    pdfEvents.emit('pdf:processing-error', {
-      file,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    })
+    pdfSourceCache.delete(sourceId)
+    closeDocumentInWorker(sourceId)
+    throw error
   }
 }
 
@@ -555,15 +662,17 @@ export async function queuePDFPages(
 function createPDFPages(file: File, pageCount: number, fileId: string | undefined): Omit<DBPage, 'order'>[] {
   const pages: Omit<DBPage, 'order'>[] = []
   const baseName = file.name.replace(/\.pdf$/i, '')
+  const extension = imageExtension(PAGE_RENDER_CONFIG.imageFormat)
+  const mimeType = imageMimeType(PAGE_RENDER_CONFIG.imageFormat)
 
   for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
-    const pageFileName = `${baseName}_${pageNum}.png`
+    const pageFileName = `${baseName}_${pageNum}.${extension}`
 
     pages.push({
       id: generatePageId(),
       fileName: pageFileName,
       fileSize: 0,
-      fileType: 'image/png',
+      fileType: mimeType,
       origin: 'pdf_generated',
       status: 'pending_render',
       progress: 0,
@@ -699,11 +808,23 @@ async function resumeFileGroup(fileId: string, pages: DBPage[]): Promise<void> {
       ? dbFile.content
       : await dbFile.content.arrayBuffer()
 
-    // Populate cache for the resumed file
+    // Re-open the document in the worker (bytes transferred once); pages come from the DB
+    let opened: OpenedDocument
+    try {
+      opened = await openDocumentInWorker(fileId, pdfData)
+    } catch (openError) {
+      const reason = openError instanceof Error ? openError.message : String(openError)
+      queueLogger.error(`[Resume] Could not open source file "${dbFile.name}": ${reason}`)
+      for (const page of pages) {
+        await db.savePage({ ...page, status: 'error' })
+      }
+      return
+    }
+
     pdfSourceCache.set(fileId, {
-      data: pdfData,
       totalPages: pages.length,
-      processedCount: 0
+      processedCount: 0,
+      fallbackFont: enhancedPdfRenderer.pickFallbackFont(opened.sampleText)
     })
 
     // Re-queue pages
@@ -725,8 +846,8 @@ async function resumeSinglePage(page: DBPage, fileName: string, sourceId: string
   // Determine page number
   let pageNumber = page.pageNumber
   if (!pageNumber) {
-    // Fallback: extract from filename (e.g. "foo_1.png")
-    const match = page.fileName.match(/_(\d+)\.png$/)
+    // Fallback: extract from filename (e.g. "foo_1.jpg"; pages created before v4.2 used .png)
+    const match = page.fileName.match(/_(\d+)\.(?:png|jpe?g)$/)
     if (match && match[1]) pageNumber = parseInt(match[1])
   }
 
@@ -773,9 +894,22 @@ export function resumeQueue() {
 }
 
 /**
- * Clear the queue
+ * Clear the queue (cancel): drop queued renders, release waiters and close every open
+ * document in the worker so its memory is freed.
  */
 export function clearQueue() {
   pdfRenderQueue.clear()
   renderingTasks.clear()
+  for (const pageId of [...pendingRenders.keys()]) {
+    settlePendingRender(pageId)
+  }
+  for (const [docId, pending] of pendingOpens) {
+    pendingOpens.delete(docId)
+    pending.reject(new Error('PDF processing cancelled'))
+    closeDocumentInWorker(docId)
+  }
+  for (const sourceId of [...pdfSourceCache.keys()]) {
+    pdfSourceCache.delete(sourceId)
+    closeDocumentInWorker(sourceId)
+  }
 }
