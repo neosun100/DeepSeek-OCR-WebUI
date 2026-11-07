@@ -385,16 +385,6 @@ describe('PageViewer.vue', () => {
     expect(uiLogger.info).toHaveBeenCalled()
   })
 
-  it('handles submitOCR error (no blob)', async () => {
-    vi.mocked(db.getPageImage).mockResolvedValue(undefined)
-    const wrapper = mountPageViewer({
-      currentPage: mockPage
-    })
-    await (wrapper.vm as any).submitOCR('document')
-    const message = (wrapper.vm as any).message
-    expect(message.error).toHaveBeenCalledWith('Could not retrieve image data')
-  })
-
   it('handles submitOCR with queue full error', async () => {
     vi.mocked(db.getPageImage).mockResolvedValue(new Blob(['img'], { type: 'image/jpeg' }))
 

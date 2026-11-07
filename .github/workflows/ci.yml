@@ -59,6 +59,10 @@ jobs:
     name: frontend e2e (chromium, mocked API)
     runs-on: ubuntu-latest
     needs: frontend
+    # 与 GitLab CI、视觉快照基线同一个镜像：ubuntu-latest 上 `playwright install --with-deps` 的系统字体不同，
+    # 快照 S2 差 6%（54216 像素）而红（2026-11-07），GitLab 在该镜像里全绿
+    container:
+      image: mcr.microsoft.com/playwright:v1.57.0-jammy
     defaults:
       run:
         working-directory: frontend
@@ -70,8 +74,9 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
       - run: npx playwright test --project=chromium --reporter=line
+        env:
+          HOME: /root
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

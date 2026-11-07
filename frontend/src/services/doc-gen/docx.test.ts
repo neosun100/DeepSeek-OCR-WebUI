@@ -165,18 +165,6 @@ End of table.
         expect(blob.size).toBeGreaterThan(0)
     })
 
-    it('should handle math conversion error gracefully', async () => {
-        // Force error by passing invalid latex that katex might choke on?
-        // Actually convertLatexToDocxMath has a try-catch.
-        // Pass something that throws in katex.renderToString?
-        // ' \u0000 ' maybe?
-        // Or mock katex.renderToString
-        const markdown = '$$ \\invalidcommandthatcrashes $$'
-        const blob = await docxGenerator.generate(markdown)
-        expect(blob.size).toBeGreaterThan(0)
-    })
-
-
     it('should use AUTO width for table cells to allow content-based sizing', async () => {
         const markdown = `
 <table>

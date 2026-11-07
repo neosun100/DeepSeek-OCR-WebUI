@@ -481,7 +481,7 @@ describe('SandwichPDFBuilder', () => {
         expect(mockPage.drawText).toHaveBeenCalledWith('Word2', expect.any(Object))
     })
 
-    it('should preserve LaTeX math characters in text layer', async () => {
+    it('should preserve LaTeX operators and commands (sqrt, *) in text layer', async () => {
         const latex = '$E = mc^2 * \\sqrt{x}$'
         const raw_text = createRawText([
             { type: 'text', box: [10, 10, 200, 50], content: latex }
