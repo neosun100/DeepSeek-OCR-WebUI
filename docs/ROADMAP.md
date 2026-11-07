@@ -23,14 +23,15 @@
 | 腐化 | 7 个 Dockerfile、4 个 `web_service*.py`、5 份 HTML 备份、~20 份 SUMMARY/GUIDE、`frontend/dist` 253 个构建产物入库、7.6 MB 论文 PDF、vendored v1 上游代码 | `ls` |
 | 发布 | 446★ / 95 fork，**0 tag / 0 release** | GitHub |
 
-## 1. 否决条件（什么结果会否决本期）
+## 1. 否决条件（什么结果会否决本期）—— 实测结论
 
-| 否决 | 测量 | 状态 |
+| 否决 | 测量 | 结论 |
 |---|---|---|
-| Mac MPS 跑不通 OCR-2 ⇒ 砍掉 Mac 支持，文档如实写「仅 CUDA」 | M5 Max 探针 | ✅ 已通过（未否决） |
-| vLLM 0.33 + OCR-2 在 24 GB 卡上产物质量劣于 HF 路径（同图同 prompt 内容字召回 < 0.95）⇒ vLLM 只做可选引擎，默认仍 HF | EC2 对照 | 待测 |
-| vLLM 吞吐提升 < 2×（并发 8，同机同图集）⇒ 不值得引入第二引擎的复杂度，砍掉 | EC2 基准 | 待测 |
-| slim 镜像在驱动 550/570 的机器上起不来 ⇒ 基础镜像回退 | EC2 选 AMI 驱动版本 / 文档说明 | 待测 |
+| Mac MPS 跑不通 OCR-2 ⇒ 砍 Mac 支持 | M5 Max 探针 + `test_real_model` 5/5 + bench | ✅ 未否决：8.1 页/分，已知文字召回 1.00 |
+| 老卡（sm<80）跑不通 ⇒ 文档写「需 Ampere+」 | T4 原生 `verify-native.sh` | ✅ 未否决：NATIVE_PASS，fp16 + eager，7.8 页/分 |
+| vLLM 与 HF 产物不一致（双向召回均值 < 0.9）⇒ vLLM 只作可选 | A10G `verify-docker.sh` P6 | 见 §8 实测（vLLM 0.33 需 legacy V1 runner 才能挂 NGram processor） |
+| vLLM 吞吐提升 < 2×（并发 8）⇒ 砍掉 vLLM 目标 | A10G bench | 见 §8 实测 |
+| find 模式（模型级 Locate）不可用 ⇒ 改服务端块级 | 2 图 × 3 词 × 2 写法 = 12 次 | 🔴 **否决模型级 find**（12/12 退回文档解析，上游 README 无 Locate 提示词）⇒ 改为块级搜索 |
 
 ## 2. 目标架构
 
