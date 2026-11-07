@@ -10,7 +10,7 @@ History for v1.0 – v4.1 lives in [archive/legacy-docs/CHANGELOG-v1-v4.md](arch
 ### Added
 
 - **New backend package** `server/deepseek_ocr_webui` (managed by `uv`, `pyproject.toml` is the single dependency source) with two engines:
-  - **transformers engine** that runs on CUDA, **Apple Silicon (MPS)** and CPU. Measured with `scripts/bench.py`: M5 Max (MPS, bf16) 8.1 pages/min; T4 (fp16, eager) 7.8; A10G 9.2.
+  - **transformers engine** that runs on CUDA, **Apple Silicon (MPS)** and CPU. Measured with `scripts/bench.py`: M5 Max (MPS, bf16) 8.1 pages/min; T4 (fp16, eager) 7.8; A10G 9.5 (final verification run).
   - **vLLM engine** (continuous batching) that manages a local `vllm serve` or load-balances across several external ones (`DSOCR_VLLM_URLS`, least in-flight). Measured on an A10G: 46.4 pages/min at concurrency 1 and 132.1 at concurrency 16 (transformers: 9.5); both engines agree on the same pages with mean character recall 0.985. Ships with the workarounds vLLM 0.33 needs for OCR-2 (legacy V1 runner for the NGram logits processor, `TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1`). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 - **Per-page output checks** in every response (`ok`, `warnings[]`, `finish_reason`): tail repetition, repetition cut, truncation, coordinate loops, invalid boxes, empty and near-empty output. Repeated tails are stopped while generating (HF `StoppingCriteria`; vLLM stream closed on detection) and trimmed from `raw_text`.
 - **Readiness you can trust**: `/health` answers 503 until the model is loaded *and* a synthetic warm-up page is read back with ≥ 0.85 character recall.
