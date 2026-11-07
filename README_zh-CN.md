@@ -31,7 +31,7 @@ v5 从零重构了后端，并加固了 Vue 3 前端。下表每个数字都经�
 | | v4.1 | **v5.0** |
 |---|---|---|
 | Apple Silicon / CPU | 能加载，但第一页就失败（上游代码硬编码了 `.cuda()`） | **可用** —— 与设备无关的推理，M5 Max 8.1 页/分钟 |
-| NVIDIA 引擎 | 仅 transformers，一次一页 | **vLLM**（连续批处理）或 **transformers** |
+| NVIDIA 引擎 | 仅 transformers，一次一页 | **vLLM**（连续批处理，A10G 上 132 页/分钟）或 **transformers** |
 | 旧 GPU（T4 / V100，无 bf16） | `BFloat16 vs float` 崩溃（#30 #40） | fp16 + eager，已在 T4 上验证 |
 | 驱动要求 | CUDA 13 镜像 ⇒ 驱动 ≥ 580（#46） | CUDA 12 构建 |
 | Docker 镜像 | 13 GB，权重打包在内（#38） | 权重放在 volume 中；`hf` 镜像解压后 ≈ 4.0 GB |
@@ -40,7 +40,7 @@ v5 从零重构了后端，并加固了 Vue 3 前端。下表每个数字都经�
 | 大型 PDF | 200 页 ⇒ IndexedDB 中 662 MB，界面卡死（#31 #50） | 78 MB，在 worker 中只解析一次；上传上限 500 MB（#51） |
 | Markdown 导出 | 丢失多框块（#49） | 所有样本字符召回率 100 % |
 | 安全 | 绑定 `0.0.0.0`，CORS `*` 且携带凭据，`v-html` 导致 XSS | 默认 `127.0.0.1`，CORS 允许列表，DOMPurify |
-| 测试 | 后端 0 个测试；123 个前端测试在 Node 26 上失败 | 后端 142 · 前端 783 · e2e 123 · 31/31 变异体被杀死 |
+| 测试 | 后端 0 个测试；123 个前端测试在 Node 26 上失败 | 后端、前端、e2e 与变异测试套件 —— 实时计数见上方徽章 |
 
 ---
 
@@ -205,15 +205,17 @@ curl -s http://127.0.0.1:8001/api/capabilities | jq '.limits, .known_weak'
 
 ## 📊 性能
 
-使用 [`scripts/bench.py`](scripts/bench.py) 在专用机器上以 document 模式测得（12 页：示例图片、渲染后的 PDF 页面、已知文本的合成页面）。"召回率"指在有已知真值的合成页面上的字符召回率。
+使用 [`scripts/bench.py`](scripts/bench.py) 在专用机器上测得（12 页：示例图片、渲染后的 PDF 页面、已知文本的合成页面；document 模式）。完整记录、显存、一致性与复现步骤：[docs/BENCHMARKS.md](docs/BENCHMARKS.md)。
 
-| 硬件 | 引擎 | 页 / 分钟 | p50 延迟 | 已知文本召回率 | Torch 显存峰值 |
+| 硬件 | 引擎 | 并发 | 页 / 分钟 | p50 延迟 | 已知文本召回率 |
 |---|---|---|---|---|---|
-| NVIDIA A10G 24 GB (g5) | transformers (bf16, eager) | 9.2 | 2.1 s | 1.00 | 7.8 GB |
-| NVIDIA T4 16 GB (g4dn) | transformers (fp16, eager) | 7.8 | 2.6 s | 1.00 | — |
-| Apple M5 Max 128 GB | transformers (MPS, bf16) | 8.1 | 3.3 s | 1.00 | — |
+| NVIDIA A10G 24 GB | **vLLM 0.33** | 1 | 46.4 | 0.81 s | 1.00 |
+| NVIDIA A10G 24 GB | **vLLM 0.33** | 16 | **132.1** | 5.88 s | 1.00 |
+| NVIDIA A10G 24 GB | transformers (bf16) | 1 | 9.5 | 2.05 s | 1.00 |
+| NVIDIA T4 16 GB | transformers (fp16) | 1 | 7.8 | 2.6 s | 1.00 |
+| Apple M5 Max | transformers (MPS, bf16) | 1 | 8.1 | 3.3 s | 1.00 |
 
-密集页面（整页表格）耗时更长：三者的 p95 延迟均为 17–20 s。
+vLLM 与 transformers 在相同页面上结果一致，双向字符召回率均值为 0.985（在一张密集页面上最低为 0.849）。transformers 一次只处理一页，因此额外的并发只会排队。
 
 ---
 
@@ -227,13 +229,13 @@ curl -s http://127.0.0.1:8001/api/capabilities | jq '.limits, .known_weak'
 
 ```bash
 uv sync --extra hf --extra mcp --group dev
-uv run pytest -n auto tests/unit tests/regression        # 142 个测试，FakeEngine，无需 GPU
+uv run pytest -n auto tests/unit tests/regression        # FakeEngine，无需 GPU
 DSOCR_REAL_MODEL=1 uv run pytest tests/e2e/test_real_model.py   # 在 CUDA / MPS 上使用真实权重
 DSOCR_BASE=http://127.0.0.1:8001 uv run pytest tests/e2e         # 针对正在运行的服务器
 cd frontend && npm ci && npx vitest run && npx playwright test --project=chromium
 ```
 
-- **变异测试** —— [`tests/mutations.ini`](tests/mutations.ini) 列出了 31 个刻意植入的 bug（判定、准入、安全默认值、就绪、引擎、MCP）；每个都必须让测试套件变红（用 touchstone `mutate.py` 运行，命令见文件头）。
+- **变异测试** —— [`tests/mutations.ini`](tests/mutations.ini) 列出了刻意植入的 bug（判定、准入、安全默认值、就绪、引擎、MCP）；每个都必须让测试套件变红（用 touchstone `mutate.py` 运行，命令见文件头）。
 - **GPU 验证** —— [`scripts/gpu-verify/`](scripts/gpu-verify) 在 GPU 机器上构建两个镜像，分别对其运行 e2e 套件、做基准测试并比对输出。
 - **生成的资源** —— `node frontend/scripts/screenshots.mjs`、`uv run python scripts/badges.py [--check]`、`deepseek-ocr-webui openapi > docs/openapi.json`。
 - CI：GitHub Actions（后端 · 前端 · e2e · 镜像构建）和 GitLab CI。

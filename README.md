@@ -31,7 +31,7 @@ v5 is a ground-up renovation of the backend and a hardening of the Vue 3 fronten
 | | v4.1 | **v5.0** |
 |---|---|---|
 | Apple Silicon / CPU | loads, then fails on first page (upstream code hard-codes `.cuda()`) | **works** — device-agnostic inference, M5 Max 8.1 pages/min |
-| NVIDIA engines | transformers only, one page at a time | **vLLM** (continuous batching) or **transformers** |
+| NVIDIA engines | transformers only, one page at a time | **vLLM** (continuous batching, 132 pages/min on an A10G) or **transformers** |
 | Old GPUs (T4 / V100, no bf16) | `BFloat16 vs float` crash (#30 #40) | fp16 + eager, verified on T4 |
 | Driver requirement | CUDA 13 image ⇒ driver ≥ 580 (#46) | CUDA 12 builds |
 | Docker image | 13 GB with weights inside (#38) | weights in a volume; `hf` image ≈ 4.0 GB unpacked |
@@ -40,7 +40,7 @@ v5 is a ground-up renovation of the backend and a hardening of the Vue 3 fronten
 | Large PDFs | 200 pages ⇒ 662 MB in IndexedDB, freezes (#31 #50) | 78 MB, parsed once in a worker; 500 MB upload limit (#51) |
 | Markdown export | dropped multi-box blocks (#49) | 100 % character recall on all samples |
 | Security | binds `0.0.0.0`, CORS `*` with credentials, XSS via `v-html` | `127.0.0.1` by default, CORS allow-list, DOMPurify |
-| Tests | 0 backend tests; 123 frontend tests failing on Node 26 | 142 backend · 783 frontend · 123 e2e · 31/31 mutants killed |
+| Tests | 0 backend tests; 123 frontend tests failing on Node 26 | backend, frontend, e2e and mutation suites — live counts in the badges above |
 
 ---
 
@@ -197,6 +197,21 @@ Tools: `ocr_image(path | image_base64, mode, find_term, custom_prompt, grounding
   <img src="docs/assets/ocr-flow-en.svg" alt="One page from upload to export">
 </picture>
 
+<details>
+<summary>中文版架构图 / Chinese diagrams</summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture.svg" alt="系统架构（中文）">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/ocr-flow-dark.svg">
+  <img src="docs/assets/ocr-flow.svg" alt="单页处理流程（中文）">
+</picture>
+
+</details>
+
 - **Browser** — PDFs are rendered in a Web Worker (each file parsed once, bytes transferred once), pages are kept in IndexedDB so long jobs survive reloads, and Markdown / DOCX / PDF are generated locally.
 - **Service** ([`server/deepseek_ocr_webui`](server/deepseek_ocr_webui)) — admission control, upload sniffing and pixel limits, the engine, per-page judges, grounding parsing.
 - **Engines** — `vllm` streams from `vllm serve` and closes the stream as soon as a repetition loop is detected; `hf` re-implements the upstream preprocessing so tensors follow the model's real device and dtype.
@@ -205,15 +220,17 @@ Tools: `ocr_image(path | image_base64, mode, find_term, custom_prompt, grounding
 
 ## 📊 Performance
 
-Measured with [`scripts/bench.py`](scripts/bench.py) (12 pages: sample images, rendered PDF pages, synthetic pages with known text) on dedicated machines, document mode. "Recall" is the character recall on the synthetic pages with known ground truth.
+Measured with [`scripts/bench.py`](scripts/bench.py) on dedicated machines (12 pages: sample images, rendered PDF pages, synthetic pages with known text; document mode). Full record, memory, agreement and reproduction steps: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-| Hardware | Engine | Pages / min | p50 latency | Known-text recall | Torch VRAM peak |
+| Hardware | Engine | Concurrency | Pages / min | p50 latency | Known-text recall |
 |---|---|---|---|---|---|
-| NVIDIA A10G 24 GB (g5) | transformers (bf16, eager) | 9.2 | 2.1 s | 1.00 | 7.8 GB |
-| NVIDIA T4 16 GB (g4dn) | transformers (fp16, eager) | 7.8 | 2.6 s | 1.00 | — |
-| Apple M5 Max 128 GB | transformers (MPS, bf16) | 8.1 | 3.3 s | 1.00 | — |
+| NVIDIA A10G 24 GB | **vLLM 0.33** | 1 | 46.4 | 0.81 s | 1.00 |
+| NVIDIA A10G 24 GB | **vLLM 0.33** | 16 | **132.1** | 5.88 s | 1.00 |
+| NVIDIA A10G 24 GB | transformers (bf16) | 1 | 9.5 | 2.05 s | 1.00 |
+| NVIDIA T4 16 GB | transformers (fp16) | 1 | 7.8 | 2.6 s | 1.00 |
+| Apple M5 Max | transformers (MPS, bf16) | 1 | 8.1 | 3.3 s | 1.00 |
 
-Dense pages (full-page tables) take longer: p95 latency was 17–20 s on all three.
+vLLM and transformers agree on the same pages with a mean bidirectional character recall of 0.985 (min 0.849 on one dense page). transformers handles one page at a time, so extra concurrency only queues.
 
 ---
 
@@ -227,13 +244,13 @@ From `GET /api/capabilities` (`known_weak` lists the public benchmark evidence):
 
 ```bash
 uv sync --extra hf --extra mcp --group dev
-uv run pytest -n auto tests/unit tests/regression        # 142 tests, FakeEngine, no GPU needed
+uv run pytest -n auto tests/unit tests/regression        # FakeEngine, no GPU needed
 DSOCR_REAL_MODEL=1 uv run pytest tests/e2e/test_real_model.py   # real weights on CUDA / MPS
 DSOCR_BASE=http://127.0.0.1:8001 uv run pytest tests/e2e         # against a running server
 cd frontend && npm ci && npx vitest run && npx playwright test --project=chromium
 ```
 
-- **Mutation testing** — [`tests/mutations.ini`](tests/mutations.ini) lists 31 deliberate bugs (judges, admission, security defaults, readiness, engines, MCP); each must turn the suite red (run with touchstone `mutate.py`, command in the file header).
+- **Mutation testing** — [`tests/mutations.ini`](tests/mutations.ini) lists deliberate bugs (judges, admission, security defaults, readiness, engines, MCP); each must turn the suite red (run with touchstone `mutate.py`, command in the file header).
 - **GPU verification** — [`scripts/gpu-verify/`](scripts/gpu-verify) builds both images on a GPU machine, runs the e2e suite against each, benchmarks them and compares their outputs.
 - **Generated assets** — `node frontend/scripts/screenshots.mjs`, `uv run python scripts/badges.py [--check]`, `deepseek-ocr-webui openapi > docs/openapi.json`.
 - CI: GitHub Actions (backend · frontend · e2e · image build) and GitLab CI.

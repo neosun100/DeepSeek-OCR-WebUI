@@ -31,7 +31,7 @@ v5 はバックエンドを一から作り直し、Vue 3 フロントエンド�
 | | v4.1 | **v5.0** |
 |---|---|---|
 | Apple Silicon / CPU | 読み込めるが最初のページで失敗（上流コードが `.cuda()` をハードコード） | **動作する** —— デバイス非依存の推論、M5 Max で 8.1 ページ/分 |
-| NVIDIA エンジン | transformers のみ、1 ページずつ | **vLLM**（continuous batching）または **transformers** |
+| NVIDIA エンジン | transformers のみ、1 ページずつ | **vLLM**（continuous batching、A10G で 132 ページ/分）または **transformers** |
 | 古い GPU（T4 / V100、bf16 非対応） | `BFloat16 vs float` でクラッシュ（#30 #40） | fp16 + eager、T4 で検証済み |
 | ドライバ要件 | CUDA 13 イメージ ⇒ ドライバ ≥ 580（#46） | CUDA 12 ビルド |
 | Docker イメージ | 重みを含めて 13 GB（#38） | 重みは volume に配置。`hf` イメージは展開後 ≈ 4.0 GB |
@@ -40,7 +40,7 @@ v5 はバックエンドを一から作り直し、Vue 3 フロントエンド�
 | 大きな PDF | 200 ページ ⇒ IndexedDB に 662 MB、フリーズ（#31 #50） | 78 MB、worker 内で 1 回だけ解析。アップロード上限 500 MB（#51） |
 | Markdown エクスポート | 複数ボックスのブロックが欠落（#49） | 全サンプルで文字再現率 100 % |
 | セキュリティ | `0.0.0.0` にバインド、認証情報付きで CORS `*`、`v-html` による XSS | デフォルトで `127.0.0.1`、CORS 許可リスト、DOMPurify |
-| テスト | バックエンドのテスト 0 件。Node 26 でフロントエンドのテスト 123 件が失敗 | バックエンド 142 · フロントエンド 783 · e2e 123 · ミュータント 31/31 を検出 |
+| テスト | バックエンドのテスト 0 件。Node 26 でフロントエンドのテスト 123 件が失敗 | バックエンド、フロントエンド、e2e、ミューテーションの各テストスイート —— 最新の件数は上のバッジを参照 |
 
 ---
 
@@ -205,15 +205,17 @@ curl -s http://127.0.0.1:8001/api/capabilities | jq '.limits, .known_weak'
 
 ## 📊 パフォーマンス
 
-[`scripts/bench.py`](scripts/bench.py) を使い、専用マシン上で document モードで計測（12 ページ: サンプル画像、レンダリングした PDF ページ、既知テキストを含む合成ページ）。「再現率」は正解が既知の合成ページにおける文字再現率です。
+[`scripts/bench.py`](scripts/bench.py) を使い専用マシン上で計測（12 ページ: サンプル画像、レンダリングした PDF ページ、既知テキストを含む合成ページ。document モード）。完全な記録、メモリ、一致度、再現手順: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)。
 
-| ハードウェア | エンジン | ページ / 分 | p50 レイテンシ | 既知テキスト再現率 | Torch VRAM ピーク |
+| ハードウェア | エンジン | 同時実行数 | ページ / 分 | p50 レイテンシ | 既知テキスト再現率 |
 |---|---|---|---|---|---|
-| NVIDIA A10G 24 GB (g5) | transformers (bf16, eager) | 9.2 | 2.1 s | 1.00 | 7.8 GB |
-| NVIDIA T4 16 GB (g4dn) | transformers (fp16, eager) | 7.8 | 2.6 s | 1.00 | — |
-| Apple M5 Max 128 GB | transformers (MPS, bf16) | 8.1 | 3.3 s | 1.00 | — |
+| NVIDIA A10G 24 GB | **vLLM 0.33** | 1 | 46.4 | 0.81 s | 1.00 |
+| NVIDIA A10G 24 GB | **vLLM 0.33** | 16 | **132.1** | 5.88 s | 1.00 |
+| NVIDIA A10G 24 GB | transformers (bf16) | 1 | 9.5 | 2.05 s | 1.00 |
+| NVIDIA T4 16 GB | transformers (fp16) | 1 | 7.8 | 2.6 s | 1.00 |
+| Apple M5 Max | transformers (MPS, bf16) | 1 | 8.1 | 3.3 s | 1.00 |
 
-高密度のページ（全面が表のページ）は時間がかかります: p95 レイテンシは 3 台すべてで 17–20 s でした。
+vLLM と transformers は同じページで一致しており、双方向の文字再現率の平均は 0.985（高密度のページ 1 枚で最小 0.849）です。transformers は 1 ページずつ処理するため、同時実行数を増やしてもキューに並ぶだけです。
 
 ---
 
@@ -227,13 +229,13 @@ curl -s http://127.0.0.1:8001/api/capabilities | jq '.limits, .known_weak'
 
 ```bash
 uv sync --extra hf --extra mcp --group dev
-uv run pytest -n auto tests/unit tests/regression        # 142 テスト、FakeEngine、GPU 不要
+uv run pytest -n auto tests/unit tests/regression        # FakeEngine、GPU 不要
 DSOCR_REAL_MODEL=1 uv run pytest tests/e2e/test_real_model.py   # CUDA / MPS 上で実際の重みを使用
 DSOCR_BASE=http://127.0.0.1:8001 uv run pytest tests/e2e         # 起動中のサーバーに対して実行
 cd frontend && npm ci && npx vitest run && npx playwright test --project=chromium
 ```
 
-- **ミューテーションテスト** —— [`tests/mutations.ini`](tests/mutations.ini) には意図的に仕込んだ 31 個のバグ（判定、アドミッション、セキュリティのデフォルト、レディネス、エンジン、MCP）が列挙されており、どれもテストスイートを赤にしなければなりません（touchstone の `mutate.py` で実行。コマンドはファイル冒頭に記載）。
+- **ミューテーションテスト** —— [`tests/mutations.ini`](tests/mutations.ini) には意図的に仕込んだバグ（判定、アドミッション、セキュリティのデフォルト、レディネス、エンジン、MCP）が列挙されており、どれもテストスイートを赤にしなければなりません（touchstone の `mutate.py` で実行。コマンドはファイル冒頭に記載）。
 - **GPU 検証** —— [`scripts/gpu-verify/`](scripts/gpu-verify) は GPU マシン上で両方のイメージをビルドし、それぞれに対して e2e スイートを実行し、ベンチマークを取り、出力を比較します。
 - **生成されるアセット** —— `node frontend/scripts/screenshots.mjs`、`uv run python scripts/badges.py [--check]`、`deepseek-ocr-webui openapi > docs/openapi.json`。
 - CI: GitHub Actions（backend · frontend · e2e · イメージビルド）と GitLab CI。
