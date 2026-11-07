@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -148,12 +149,14 @@ class VLLMEngine(Engine):
         )
         self._log_path = log_path
 
-    def _log_tail(self, n: int = 30) -> str:
+    def _log_tail(self, n: int = 12) -> str:
+        """根因 + 末尾上下文。只截末尾不够：vLLM 的根因（如 Triton NameError）在外层调用栈之前，
+        末尾 30 行全是 RuntimeError 的包装栈（2026-11-07 A10G 实测）。"""
         try:
             lines = Path(self._log_path).read_text(errors="replace").splitlines()
-            return "\n".join(lines[-n:])
         except (OSError, AttributeError):
             return "(无 vLLM 日志)"
+        return summarize_vllm_log(lines, n)
 
     async def _wait_ready(self) -> None:
         assert self._client is not None
@@ -340,3 +343,20 @@ class VLLMEngine(Engine):
 
 class _ContextTooLong(Exception):
     pass
+
+
+_EXC_LINE = re.compile(r"\b([A-Z][A-Za-z]*(?:Error|Exception))\b[:(]")
+
+
+def summarize_vllm_log(lines: list[str], tail: int = 12) -> str:
+    """从 vLLM 日志里挑出真正的异常行（最后 3 条不同的 `XxxError:` / `XxxError(`），再附末尾 tail 行。"""
+    roots: list[str] = []
+    for ln in reversed(lines):
+        if _EXC_LINE.search(ln) and 'File "' not in ln:
+            s = ln.strip()[:400]
+            if s not in roots:
+                roots.append(s)
+        if len(roots) >= 3:
+            break
+    head = "根因：\n" + "\n".join(reversed(roots)) if roots else "根因：未在日志中找到异常行"
+    return head + "\n…末尾：\n" + "\n".join(lines[-tail:])

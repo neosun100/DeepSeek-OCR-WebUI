@@ -120,3 +120,19 @@ def test_external_backends_skip_subprocess() -> None:
     asyncio.run(e.load())
     assert starts == [] and e.max_concurrency == 8
     assert e._pick_url() == "http://a:8000"
+
+
+def test_log_summary_surfaces_root_cause_not_wrapper() -> None:
+    from deepseek_ocr_webui.engines.vllm import summarize_vllm_log
+
+    lines = [
+        "INFO starting",
+        "(EngineCore pid=147) ERROR [core.py:1584] Traceback (most recent call last):",
+        '(EngineCore pid=147) ERROR [core.py:1584]   File "/x/core.py", line 1, in run',
+        '(EngineCore pid=147) ERROR [core.py:1584] NameError("Cannot access global variable LOG2E from within @jit\'ed function")',
+        *[f'  File "/x/wrapper{i}.py", line {i}, in f' for i in range(40)],
+        "RuntimeError: Engine core initialization failed. See root cause above.",
+    ]
+    out = summarize_vllm_log(lines)
+    assert "LOG2E" in out  # 根因在末尾 30 行之外，必须被挑出来
+    assert out.index("NameError") < out.index("RuntimeError")

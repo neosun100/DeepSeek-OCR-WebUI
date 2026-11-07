@@ -30,7 +30,8 @@ read -ra TARGET_LIST <<< "${TARGETS:-hf vllm}"
 # （2026-11-07 教训：4 h 自毁把远端结果文件一起带走了，只剩轮询快照）
 upload() {
   if [ -n "${RESULTS_PUT_URL:-}" ]; then
-    tar -czf - -C "$WORK" results | curl -fsS -X PUT -T - "$RESULTS_PUT_URL" >/dev/null && note "results uploaded"
+    # 先落文件再传：curl -T -（stdin）走 chunked 编码，S3 预签名 PUT 回 501（2026-11-07 实测）
+    tar -czf /tmp/dsocr-results.tgz -C "$WORK" results && curl -fsS -X PUT -T /tmp/dsocr-results.tgz "$RESULTS_PUT_URL" >/dev/null && note "results uploaded"
   fi
   return 0
 }
@@ -72,7 +73,11 @@ run_engine() {
   docker rm -f "$name" >/dev/null 2>&1
   note "start $target"
   local t0; t0=$(date +%s)
-  docker run -d --name "$name" --gpus all --shm-size 8g -p 127.0.0.1:8001:8001 -v "$MODELS:/models" "dsocr:$target" >/dev/null || { fail "P2_start_$target"; return; }
+  # 容器内日志（含 vLLM 子进程日志）挂到 results/：容器删掉后根因仍在（vLLM 根因在其日志前部，只看末尾找不到）
+  mkdir -p "$RES/logs-$target"; chmod 777 "$RES/logs-$target"
+  rm -f "$RES/health-$target.json"   # 旧文件会让判定读到上一轮的状态（两次踩坑）
+  docker run -d --name "$name" --gpus all --shm-size 8g -p 127.0.0.1:8001:8001 -v "$MODELS:/models" \
+    -v "$RES/logs-$target:/app/logs" "dsocr:$target" >/dev/null || { fail "P2_start_$target"; return; }
   vram_sampler "$RES/vram-$target.trace" & local vpid=$!
   local ready=0
   for _ in $(seq 1 240); do
