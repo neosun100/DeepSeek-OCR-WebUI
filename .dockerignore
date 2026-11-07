@@ -1,52 +1,21 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-dist/
-build/
-
-# Virtual environments
-venv/
-env/
-ENV/
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Git
-.git/
-.gitignore
-
-# Models cache (will be mounted as volume)
-models/
-.cache/
-
-# Logs
-logs/
-*.log
-
-# Backup files
-*.backup
-*.bak
-
-# Docker
-.dockerignore
-Dockerfile
-docker-compose.yml
-
-# Documentation
-README*.md
-*.pdf
-assets/
-images/
+# 构建上下文只需要 pyproject/uv.lock/server/frontend 源码
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+archive
+docs
+tests
+assets
+models
+logs
+.env
+.env.*
+!.env.example
+frontend/node_modules
+frontend/dist
+frontend/test-results
+frontend/playwright-report
+frontend/coverage
+# frontend/tests 不排除：src/**/*.test.ts 引用 tests/ 下工具，vue-tsc -b 构建期会类型检查它们（真机构建失败抓到）

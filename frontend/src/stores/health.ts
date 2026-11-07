@@ -1,12 +1,15 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { HealthCheckService } from '@/services/health'
-import type { HealthResponse } from '@/services/health'
+import type { HealthResponse, ServiceState } from '@/services/health'
 import { config } from '@/config'
 
 export const useHealthStore = defineStore('health', () => {
     // State
+    // isHealthy = "service can accept tasks": true for ready AND starting (tasks queue and wait
+    // for the model), false for model load error / unreachable. Use isReady for "model loaded".
     const isHealthy = ref(true)
+    const serviceState = ref<ServiceState>('unknown')
     const healthInfo = ref<HealthResponse | null>(null)
     const lastCheckTime = ref<Date | null>(null)
     const error = ref<Error | null>(null)
@@ -59,14 +62,33 @@ export const useHealthStore = defineStore('health', () => {
         if (!healthService) return
 
         isHealthy.value = healthService.getStatus()
+        serviceState.value = healthService.getServiceState()
         healthInfo.value = healthService.getHealthInfo()
         lastCheckTime.value = healthService.getLastCheckTime()
+    }
+
+    /**
+     * Check immediately and refresh the UI state (used when the tab becomes visible again)
+     */
+    async function checkNow() {
+        if (!healthService) return
+        await healthService.checkNow()
+        updateStatus()
     }
 
     // Computed properties for easy access
     const queueStatus = computed(() => healthInfo.value?.ocr_queue)
     const rateLimits = computed(() => healthInfo.value?.rate_limits)
     const yourQueueStatus = computed(() => healthInfo.value?.your_queue_status)
+
+    // Service state helpers
+    const isReady = computed(() => serviceState.value === 'ready')
+    const isStarting = computed(() => serviceState.value === 'starting')
+    const isModelError = computed(() => serviceState.value === 'error')
+    const isUnreachable = computed(() => serviceState.value === 'unavailable')
+    const loadError = computed(() => healthInfo.value?.load_error ?? null)
+    const engineInfo = computed(() => healthInfo.value?.engine ?? null)
+    const serverVersion = computed(() => healthInfo.value?.version ?? null)
 
     // Status helpers
     const isBusy = computed(() => {
@@ -95,11 +117,19 @@ export const useHealthStore = defineStore('health', () => {
     return {
         // State
         isHealthy,
+        serviceState,
         healthInfo,
         lastCheckTime,
         error,
 
         // Computed
+        isReady,
+        isStarting,
+        isModelError,
+        isUnreachable,
+        loadError,
+        engineInfo,
+        serverVersion,
         queueStatus,
         rateLimits,
         yourQueueStatus,
@@ -112,6 +142,7 @@ export const useHealthStore = defineStore('health', () => {
         // Actions
         startHealthCheck,
         stopHealthCheck,
-        updateStatus
+        updateStatus,
+        checkNow
     }
 })

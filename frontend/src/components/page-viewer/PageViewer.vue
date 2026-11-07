@@ -242,6 +242,8 @@
     <OCRRawTextPanel
       v-if="ocrResult?.raw_text"
       :text="ocrResult.raw_text"
+      :warnings="ocrResult.warnings"
+      :finish-reason="ocrResult.finish_reason"
     />
 
     <!-- Input Modal -->

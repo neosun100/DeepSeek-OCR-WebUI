@@ -2,18 +2,26 @@ export interface AppConfig {
     apiBaseUrl: string
 }
 
-const DEV_API_BASE_URL = 'https://ocr.cloudmantools.top'
-// const DEV_API_BASE_URL = 'http://192.168.1.14:8001'
+/**
+ * Default API base URL: '' means same origin.
+ * - Production: the frontend is served by the backend itself.
+ * - Development (`npm run dev`): requests go to the Vite dev server, which
+ *   proxies /api, /ocr and /health to VITE_DEV_PROXY_TARGET
+ *   (default http://127.0.0.1:8001, see vite.config.ts).
+ * There is deliberately no hosted fallback: a third-party default would ship
+ * every document a developer tests with to a server they did not choose.
+ */
+const DEFAULT_API_BASE_URL = ''
 
-const PROD_API_BASE_URL = ''
+/**
+ * Resolve the API base URL. VITE_API_BASE_URL (build-time env, e.g. CI or a
+ * local .env file) overrides the same-origin default in every mode.
+ */
+export function resolveApiBaseUrl(env: Record<string, unknown>): string {
+    const override = env.VITE_API_BASE_URL
+    return typeof override === 'string' && override ? override : DEFAULT_API_BASE_URL
+}
 
 export const config: AppConfig = {
-    /**
-     * API Base URL selection priority:
-     * 1. Environment Variable: VITE_API_BASE_URL (Injected during CI/CD, e.g., GitHub Actions)
-     * 2. Development Mode: DEV_API_BASE_URL (Used during local `npm run dev`)
-     * 3. Production Default: PROD_API_BASE_URL (Fallback for local `npm run build`)
-     */
-    apiBaseUrl: import.meta.env.VITE_API_BASE_URL
-        || (import.meta.env.DEV ? DEV_API_BASE_URL : PROD_API_BASE_URL),
+    apiBaseUrl: resolveApiBaseUrl(import.meta.env),
 }

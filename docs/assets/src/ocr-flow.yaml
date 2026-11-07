@@ -1,0 +1,40 @@
+# 一页 PDF 从上传到导出（arcflow flowchart spec：只写关系，不写坐标）
+# 生成：cd ~/Code/arcflow && uv run --with pyyaml python -m arcflow.cli render <本文件> -o docs/assets/ocr-flow.svg
+#       再加 --theme dark -o docs/assets/ocr-flow-dark.svg
+kind: flowchart
+direction: TB
+theme: light
+title: 一页 PDF 的 OCR 流程
+subtitle: 两个判断点：准入排队满 ⇒ 等待重试；判据有失败型 warning ⇒ 标警告但仍返回结果
+footer: 复读检测在流式推理中进行，命中即截断，不等整页生成完
+
+nodes:
+  - {id: imp,     label: 导入 PDF,           icon: "glyph:file"}
+  - {id: render,  label: Worker 渲染页图,     icon: "glyph:worker", sub: JPEG · 长边 2304px}
+  - {id: enq,     label: 入队,               icon: "glyph:queue"}
+  - {id: post,    label: POST /api/ocr,      icon: "glyph:gateway"}
+  - {id: q429,    label: 排队已满（429）？,    shape: diamond, icon: "glyph:decision"}
+  - {id: wait,    label: 等待后重试,          icon: "glyph:wait"}
+  - {id: infer,   label: 引擎推理,           icon: "glyph:model", sub: 流式复读检测 · 命中即截断, pulse: true}
+  - {id: ground,  label: grounding 解析,      icon: "glyph:batch", sub: 版面框 + 清洗}
+  - {id: judge,   label: 逐页判据,           icon: "glyph:audit", sub: ok / warnings}
+  - {id: qwarn,   label: 有失败型 warning？,   shape: diamond, icon: "glyph:decision"}
+  - {id: mark,    label: 页面标警告,          icon: "glyph:alert", sub: 结果照常返回}
+  - {id: preview, label: 前端渲染预览,        icon: "glyph:browser", sub: 版面框叠加}
+  - {id: export,  label: 导出 MD / DOCX / PDF, icon: "glyph:end"}
+
+edges:
+  - {from: imp,     to: render,  flow: control}
+  - {from: render,  to: enq,     flow: control}
+  - {from: enq,     to: post,    flow: request}
+  - {from: post,    to: q429,    flow: control}
+  - {from: q429,    to: wait,    flow: error,   label: 是}
+  - {from: wait,    to: post,    flow: aux,     label: 重试}
+  - {from: q429,    to: infer,   flow: request, label: 否}
+  - {from: infer,   to: ground,  flow: data}
+  - {from: ground,  to: judge,   flow: data}
+  - {from: judge,   to: qwarn,   flow: control}
+  - {from: qwarn,   to: mark,    flow: error,   label: 是}
+  - {from: qwarn,   to: preview, flow: reply,   label: 否}
+  - {from: mark,    to: preview, flow: reply}
+  - {from: preview, to: export,  flow: write}

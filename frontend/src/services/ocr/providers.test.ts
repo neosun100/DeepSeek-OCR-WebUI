@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { DeepSeekOCRProvider } from './providers'
+import { DeepSeekOCRProvider, parseErrorBody } from './providers'
+import { ModelLoadingError, OCRApiError, QueueFullError } from './types'
 
 // Mock config
 vi.mock('@/config', () => ({
@@ -72,7 +73,8 @@ describe('DeepSeekOCRProvider', () => {
             raw_text: 'raw',
             boxes: [],
             image_dims: { w: 100, h: 100 },
-            prompt_type: 'document'
+            prompt_type: 'document',
+            metadata: { some: 'meta' }
         })
     })
 
@@ -250,5 +252,104 @@ describe('DeepSeekOCRProvider', () => {
 
         await expect(provider.process(blob)).rejects.toThrow('Rate Limit Exceeded')
     })
-})
 
+    describe('v5 contract', () => {
+        const blob = new Blob([''], { type: 'image/jpeg' })
+        const v5Error = (status: number, error: string, message: string, extra: Record<string, unknown> = {}) => ({
+            ok: false,
+            status,
+            statusText: '',
+            headers: new Headers(status === 503 ? { 'Retry-After': '7' } : {}),
+            json: async () => ({ success: false, detail: { error, message, ...extra }, request_id: 'rid123' })
+        })
+
+        it('maps v5 success fields (ok, finish_reason, warnings, request_id)', async () => {
+            fetchMock.mockResolvedValue({
+                ok: true,
+                json: async () => ({
+                    ...mockResponse,
+                    ok: false,
+                    finish_reason: 'repetition_cut',
+                    warnings: [{ code: 'repetition_cut', message: 'cut' }, { bogus: true }],
+                    content_chars: 42,
+                    request_id: 'abc'
+                })
+            })
+            const result = await new DeepSeekOCRProvider().process(blob)
+            expect(result.ok).toBe(false)
+            expect(result.finish_reason).toBe('repetition_cut')
+            expect(result.warnings).toEqual([{ code: 'repetition_cut', message: 'cut' }])
+            expect(result.content_chars).toBe(42)
+            expect(result.request_id).toBe('abc')
+        })
+
+        it('passes the backend message through for 500 (issue #39)', async () => {
+            fetchMock.mockResolvedValue(v5Error(500, 'internal_error', 'Internal: CUDA error: device-side assert'))
+            const err = await new DeepSeekOCRProvider().process(blob).catch(e => e)
+            expect(err).toBeInstanceOf(OCRApiError)
+            expect(err.message).toContain('CUDA error: device-side assert')
+            expect(err.status).toBe(500)
+            expect(err.code).toBe('internal_error')
+            expect(err.requestId).toBe('rid123')
+        })
+
+        it('passes 413 message with actual/limit', async () => {
+            fetchMock.mockResolvedValue(v5Error(413, 'file_too_large', 'file too large', { actual: '>50 MB', limit: '50 MB' }))
+            const err = await new DeepSeekOCRProvider().process(blob).catch(e => e)
+            expect(err.message).toBe('OCR API Error: 413: file too large')
+            expect(err.actual).toBe('>50 MB')
+            expect(err.limit).toBe('50 MB')
+        })
+
+        it('treats 503 model_loading as retryable ModelLoadingError with Retry-After', async () => {
+            fetchMock.mockResolvedValue(v5Error(503, 'model_loading', 'model is loading'))
+            const err = await new DeepSeekOCRProvider().process(blob).catch(e => e)
+            expect(err).toBeInstanceOf(ModelLoadingError)
+            expect(err.retryAfterMs).toBe(7000)
+        })
+
+        it('does not treat 503 model_unavailable as retryable', async () => {
+            fetchMock.mockResolvedValue(v5Error(503, 'model_unavailable', 'load failed: OOM'))
+            const err = await new DeepSeekOCRProvider().process(blob).catch(e => e)
+            expect(err).toBeInstanceOf(OCRApiError)
+            expect(err).not.toBeInstanceOf(ModelLoadingError)
+            expect(err.message).toContain('load failed: OOM')
+        })
+
+        it.each([
+            ['queue_full', 'OCR queue full, please retry later', 'Queue Full'],
+            ['client_limit', 'Client at max concurrent', 'Client Limit'],
+            ['ip_limit', 'IP at max concurrent', 'IP Limit']
+        ])('maps 429 %s by code', async (code, message, expected) => {
+            fetchMock.mockResolvedValue(v5Error(429, code, message))
+            await expect(new DeepSeekOCRProvider().process(blob)).rejects.toThrow(expected)
+        })
+
+        it('maps 429 queue_full by code even if the message lost the v4 phrase', async () => {
+            fetchMock.mockResolvedValue(v5Error(429, 'queue_full', '排队已满'))
+            await expect(new DeepSeekOCRProvider().process(blob)).rejects.toBeInstanceOf(QueueFullError)
+        })
+
+        it('keeps v4 {success:false, error} message for non-2xx', async () => {
+            fetchMock.mockResolvedValue({
+                ok: false, status: 500, statusText: 'Internal Server Error',
+                json: async () => ({ success: false, error: 'CUDA out of memory' })
+            })
+            await expect(new DeepSeekOCRProvider().process(blob))
+                .rejects.toThrow('OCR API Error: 500 Internal Server Error: CUDA out of memory')
+        })
+    })
+
+    describe('parseErrorBody', () => {
+        it.each([
+            [{ detail: { error: 'x', message: 'm' }, request_id: 'r' }, { code: 'x', message: 'm', requestId: 'r' }],
+            [{ detail: 'v4 string' }, { code: null, message: 'v4 string', requestId: null }],
+            [{ success: false, error: 'v4 error' }, { code: null, message: 'v4 error', requestId: null }],
+            [{ detail: [{ msg: 'field required' }] }, { code: null, message: 'field required', requestId: null }],
+            ['<html>', { code: null, message: null, requestId: null }],
+            [null, { code: null, message: null, requestId: null }]
+        ])('parses %j', (body, expected) => {
+            expect(parseErrorBody(body)).toMatchObject(expected)
+        })
+    })
+})

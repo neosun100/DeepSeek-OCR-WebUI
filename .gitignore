@@ -1,77 +1,47 @@
-# Python
+# ---- secrets（全局规则：必须包含）----
+.env
+.env.*
+!.env.example
+*credentials*
+*secrets*
+
+# ---- Python ----
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 *.egg-info/
-.installed.cfg
-*.egg
+build/
+dist/
 
-# Virtual Environment
-venv/
-ENV/
-env/
-.venv
+# ---- 模型与运行期产物（体积大，不进仓库）----
+models/
+*.safetensors
+*.bin
+*.ckpt
+*.pth
+logs/
+*.log
+.runs/
 
-# IDE
+# ---- 前端构建产物（Docker 多阶段构建 / release 附件提供）----
+frontend/dist/
+frontend/node_modules/
+frontend/test-results/
+frontend/playwright-report/
+frontend/coverage/
+
+# ---- OS / IDE ----
+.DS_Store
+Thumbs.db
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
+.omc/
 
-# Models (太大不上传)
-models/
-*.bin
-*.safetensors
-*.ckpt
-*.pth
-
-# Logs
-*.log
-logs/
-nohup.out
-
-# Environment
-.env
-.env.local
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-temp/
-tmp/
-
-# Cache
-.cache/
-*.cache
-
-# Test files
-test_*.py
-*_test.py
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Documentation (中文文档保留，但排除临时文档)
-*_temp.md
-*_backup.md
-公众号文章_v3.1更新.md
-.cursor_sessions/
+# Claude Code worktrees / 本地状态
+.claude/

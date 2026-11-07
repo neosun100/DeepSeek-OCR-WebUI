@@ -1,0 +1,54 @@
+# DeepSeek-OCR-WebUI v5.0 系统架构（arcflow spec：只写关系，不写坐标）
+# 生成：cd ~/Code/arcflow && uv run --with pyyaml python -m arcflow.cli render <本文件> -o docs/assets/architecture.svg
+#       再加 --theme dark -o docs/assets/architecture-dark.svg
+# 事实来源：frontend/src/services/pdf/config.ts（2304px）、frontend/package.json（dexie / p-queue / pdfjs-dist）、
+#           server/deepseek_ocr_webui/{app.py,config.py,engines/,judges.py,mcp_server.py}
+kind: architecture
+direction: LR
+theme: light
+title: DeepSeek-OCR-WebUI v5.0 · 系统架构
+subtitle: 浏览器端渲染与持久化，服务端准入 + 判据，引擎层 vLLM / transformers 二选一
+footer: 服务默认只绑 127.0.0.1 · 模型 revision 钉死 · MCP 与 WebUI 走同一 HTTP API
+
+groups:
+  - {id: web, label: 浏览器 · Vue 3 WebUI, kind: team}
+  - {id: api, label: FastAPI · deepseek_ocr_webui, kind: trust}
+  - {id: eng, label: 引擎层（二选一）, kind: stage}
+
+nodes:
+  - {id: user,   label: 用户,            icon: "glyph:user", sub: PDF / 图片}
+  - {id: worker, label: pdf.js Web Worker, icon: "glyph:worker", group: web, sub: 页图 JPEG · 长边 2304px}
+  - {id: idb,    label: IndexedDB,        icon: "glyph:db",     group: web, sub: Dexie 持久化}
+  - {id: queue,  label: OCR 队列,         icon: "glyph:queue",  group: web, sub: p-queue}
+  - {id: export, label: 导出,             icon: "glyph:file",   group: web, sub: Markdown / DOCX / PDF}
+  - {id: mcp,    label: MCP server,       icon: "glyph:agent",  sub: ocr_image / ocr_pdf / health, layer: 2}
+
+  - {id: http,   label: HTTP API,         icon: "glyph:gateway", group: api, sub: /api/ocr · /api/ocr/pdf（NDJSON）· 兼容 /ocr}
+  - {id: health, label: 就绪探针,         icon: "glyph:monitor", group: api, sub: /health 预热前 503 · /api/capabilities}
+  - {id: admit,  label: 准入限流,         icon: "glyph:firewall", group: api, sub: 排队上限 / 每客户端 / 每 IP}
+  - {id: sniff,  label: 上传嗅探 + 像素闸, icon: "glyph:shield", group: api}
+  - {id: judge,  label: 逐页判据,         icon: "glyph:audit",  group: api, sub: 复读 / 坐标循环 / 截断 / 空输出}
+
+  - {id: vllm,   label: vLLM 引擎,        icon: "glyph:stream", group: eng, sub: OpenAI 兼容流式 · NGram 防复读 · 多 URL 最少在途}
+  - {id: vserve, label: vllm serve,       icon: "glyph:service", group: eng, sub: 托管或外部}
+  - {id: hf,     label: transformers 引擎, icon: "glyph:container", group: eng, sub: CUDA / MPS / CPU · 复读 StoppingCriteria}
+  - {id: model,  label: DeepSeek-OCR-2,   icon: "glyph:model", sub: deepseek-ai · revision 钉死, pulse: true}
+
+edges:
+  - {from: user,   to: worker, flow: request, label: 导入}
+  - {from: worker, to: idb,    flow: write,   label: 页图}
+  - {from: idb,    to: queue,  flow: read}
+  - {from: queue,  to: http,   flow: request, label: POST /api/ocr}
+  - {from: mcp,    to: http,   flow: request}
+  - {from: http,   to: health, flow: aux, static: true}
+  - {from: http,   to: admit,  flow: control}
+  - {from: admit,  to: sniff,  flow: control}
+  - {from: sniff,  to: vllm,   flow: request}
+  - {from: sniff,  to: hf,     flow: request}
+  - {from: vllm,   to: vserve, flow: request, label: 流式}
+  - {from: vserve, to: model,  flow: data}
+  - {from: hf,     to: model,  flow: data}
+  - {from: vllm,   to: judge,  flow: reply}
+  - {from: hf,     to: judge,  flow: reply}
+  - {from: judge,  to: queue,  flow: reply, label: 结果 + warnings}
+  - {from: queue,  to: export, flow: write}

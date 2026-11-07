@@ -1,56 +1,78 @@
-# DeepSeek-OCR-WebUI Dockerfile
-# 基于 NVIDIA PyTorch 镜像，支持 GPU 加速
-# 使用最新镜像，采用 transformers 引擎（更稳定）
+# syntax=docker/dockerfile:1.7
+# DeepSeek-OCR-WebUI v5 —— 多阶段构建，两个可发布目标：
+#   docker build -t deepseek-ocr-webui .               # 默认：vLLM 引擎（CUDA，连续批处理，吞吐优先）
+#   docker build -t deepseek-ocr-webui:hf --target hf .   # transformers 引擎（体积小、旧 GPU 也能跑）
+#
+# 权重不打进镜像（v4 的 13 GB 镜像拉不下来，#38）：首次启动下载到 /models（挂卷持久化），
+# 离线部署设 DSOCR_MODEL_PATH 指向已下载的目录。
 
-FROM nvcr.io/nvidia/pytorch:25.09-py3
+ARG VLLM_IMAGE=vllm/vllm-openai:v0.33.0
 
-# 设置环境变量
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    VLLM_USE_V1=0 \
-    CUDA_VISIBLE_DEVICES=0 \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
-    CUDA_HOME=/usr/local/cuda
+# ---------------------------------------------------------------- frontend
+FROM node:22-alpine AS frontend
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+# 同源部署：前端直接打本服务的 /ocr、/health
+ENV VITE_API_BASE_URL=""
+RUN npm run build
 
+# ---------------------------------------------------------------- hf (transformers)
+FROM python:3.12-slim AS hf
+# gcc：torch 的 Triton JIT 首次推理时要编译 C 启动桩；slim 镜像没有编译器 ⇒ 预热报
+# "Failed to find C compiler"（2026-11-07 A10G 真机；预热把它拦在了启动期，而不是用户的第一个请求）
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
+    PATH=/app/.venv/bin:$PATH
 WORKDIR /app
-
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    wget \
-    curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制依赖文件
-COPY requirements.txt .
-COPY DeepSeek-OCR-master ./DeepSeek-OCR-master
-
-# 安装 Python 依赖
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
-
-# 安装 FastAPI 和其他 Web 依赖（替代 vLLM）
-RUN pip install \
-    fastapi==0.119.1 \
-    uvicorn[standard]==0.38.0 \
-    python-multipart==0.0.20 \
-    python-decouple==3.8
-
-# 复制应用代码
-COPY web_service.py .
-COPY web_service_gpu.py .
-COPY gpu_manager.py .
-COPY ocr_ui_modern.html .
-COPY backends ./backends
-COPY i18n.js .
-
-# 暴露端口
+# 先只装依赖（层缓存：改源码不重装 torch）
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra hf --no-install-project
+COPY server ./server
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra hf
+COPY --from=frontend /src/frontend/dist /app/frontend/dist
+# 容器内监听所有接口是容器网络的需要；对外暴露边界在端口发布 `-p 127.0.0.1:8001:8001`（见 docker-compose.yml）
+ENV DSOCR_ENGINE=hf \
+    DSOCR_FRONTEND_DIST=/app/frontend/dist \
+    HF_HOME=/models \
+    DSOCR_LOG_DIR=/app/logs \
+    DSOCR_HOST=0.0.0.0 \
+    PYTHONUNBUFFERED=1
+RUN useradd --create-home --uid 1000 app && mkdir -p /models /app/logs && chown -R app /models /app/logs
+USER app
 EXPOSE 8001
+VOLUME ["/models"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20m --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=8).status == 200 else 1)"
+ENTRYPOINT ["deepseek-ocr-webui", "serve"]
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5m --retries=3 \
-    CMD curl -f http://localhost:8001/health || exit 1
-
-# 启动服务 (使用 GPU 管理版本 - 懒加载 + 即用即卸)
-CMD ["python", "web_service_gpu.py", "8001"]
+# ---------------------------------------------------------------- vllm (default)
+FROM ${VLLM_IMAGE} AS vllm
+WORKDIR /app
+# vLLM 镜像自带 torch / transformers / fastapi；只补本服务的核心依赖，--no-deps 装本包避免改动 vLLM 的版本钉
+COPY pyproject.toml README.md ./
+COPY server ./server
+# pip check 只比「装前 / 装后」：vLLM 官方镜像自身就有不一致（nccl、opentelemetry，2026-11-07 实测），
+# 那不是本层引入的；本层只许不新增冲突
+RUN (python3 -m pip check > /tmp/pipcheck.before 2>&1 || true) \
+ && python3 -m pip install --no-cache-dir "loguru>=0.7.3" "pymupdf>=1.26" "pydantic-settings>=2.6" "python-multipart>=0.0.20" \
+ && python3 -m pip install --no-cache-dir --no-deps . \
+ && (python3 -m pip check > /tmp/pipcheck.after 2>&1 || true) \
+ && if grep -vxFf /tmp/pipcheck.before /tmp/pipcheck.after | grep -v "No broken requirements"; then echo "本层引入了新的依赖冲突" >&2; exit 1; fi
+COPY --from=frontend /src/frontend/dist /app/frontend/dist
+ENV DSOCR_ENGINE=vllm \
+    DSOCR_FRONTEND_DIST=/app/frontend/dist \
+    HF_HOME=/models \
+    DSOCR_LOG_DIR=/app/logs \
+    DSOCR_HOST=0.0.0.0 \
+    PYTHONUNBUFFERED=1
+RUN mkdir -p /models /app/logs
+EXPOSE 8001
+VOLUME ["/models"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20m --retries=3 \
+    CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=8).status == 200 else 1)"
+ENTRYPOINT ["deepseek-ocr-webui", "serve"]

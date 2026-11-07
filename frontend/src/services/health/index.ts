@@ -1,12 +1,13 @@
 import { consola } from 'consola'
 import { getClientId } from '@/services/clientId'
-import type { HealthResponse } from './types'
+import type { HealthResponse, ServiceState } from './types'
 
 const healthLogger = consola.withTag('Health')
 
 export class HealthCheckService {
     private intervalId: number | null = null
     private isHealthy: boolean = true
+    private state: ServiceState = 'unknown'
     private lastCheckTime: Date | null = null
     private healthInfo: HealthResponse | null = null
     private readonly checkInterval: number = 5000 // 5 seconds
@@ -77,6 +78,21 @@ export class HealthCheckService {
     }
 
     /**
+     * Get the detailed service state (ready / starting / error / unavailable / unknown)
+     */
+    getServiceState(): ServiceState {
+        return this.state
+    }
+
+    /**
+     * Run one check right away (e.g. when the tab becomes visible again after timers were throttled).
+     * Does not start a second polling loop.
+     */
+    async checkNow(): Promise<void> {
+        await this.performCheck()
+    }
+
+    /**
      * Get health info from last successful check
      */
     getHealthInfo(): HealthResponse | null {
@@ -108,26 +124,17 @@ export class HealthCheckService {
             clearTimeout(timeoutId)
 
             if (!response.ok) {
+                // v5 answers 503 with a JSON body while the model is loading or failed to load
+                const body = await this.readBody(response)
+                if (response.status === 503 && body && (body.status === 'starting' || body.status === 'error')) {
+                    this.applyResponse(body.status, body)
+                    return
+                }
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`)
             }
 
             const data: HealthResponse = await response.json()
-
-            // Update state
-            this.lastCheckTime = new Date()
-
-            // Service is healthy if it responds successfully
-            // Even 'busy' and 'full' states mean the service is operational
-            if (!this.isHealthy) {
-                healthLogger.success('[HealthCheckService] OCR service recovered')
-            }
-            this.isHealthy = true
-            this.healthInfo = data
-
-            // Log status changes for monitoring
-            if (data.status !== 'healthy') {
-                healthLogger.warn('[HealthCheckService] OCR service status', { status: data.status })
-            }
+            this.applyResponse('ready', data)
         } catch (error) {
             // Update state
             this.lastCheckTime = new Date()
@@ -137,9 +144,47 @@ export class HealthCheckService {
             }
 
             this.isHealthy = false
+            this.state = 'unavailable'
             this.healthInfo = null
+        }
+    }
+
+    private async readBody(response: Response): Promise<HealthResponse | null> {
+        try {
+            const body = await response.json()
+            return body && typeof body === 'object' ? body as HealthResponse : null
+        } catch {
+            // Non-JSON 5xx (proxy error page) → treated as unavailable by the caller
+            return null
+        }
+    }
+
+    /**
+     * Apply a successful exchange. 'starting' still counts as healthy so tasks can be queued
+     * and wait; 'error' (model failed to load) does not.
+     */
+    private applyResponse(state: 'ready' | 'starting' | 'error', data: HealthResponse): void {
+        this.lastCheckTime = new Date()
+        const wasHealthy = this.isHealthy
+        const previous = this.state
+        this.state = state
+        this.isHealthy = state !== 'error'
+        this.healthInfo = data
+
+        if (state === 'error') {
+            if (previous !== 'error') {
+                healthLogger.error('[HealthCheckService] OCR model failed to load', { load_error: data.load_error })
+            }
+            return
+        }
+        if (!wasHealthy || previous === 'error') {
+            healthLogger.success('[HealthCheckService] OCR service recovered')
+        }
+        // Log status changes for monitoring
+        if (data.status !== 'healthy' && previous !== state) {
+            healthLogger.warn('[HealthCheckService] OCR service status', { status: data.status })
         }
     }
 }
 
-export type { HealthResponse } from './types'
+export type { HealthResponse, HealthStatus, ServiceState, EngineInfo } from './types'

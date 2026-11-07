@@ -1,0 +1,55 @@
+# DeepSeek-OCR-WebUI v5.0 system architecture, English edition (arcflow spec: relations only, no coordinates)
+# Structure and edges mirror architecture.yaml exactly; only reader-facing text is translated.
+# Render: cd ~/Code/arcflow && uv run --with pyyaml python -m arcflow.cli render <this file> -o docs/assets/architecture-en.svg
+#         then add --theme dark -o docs/assets/architecture-en-dark.svg
+# Sources: frontend/src/services/pdf/config.ts (2304px), frontend/package.json (dexie / p-queue / pdfjs-dist),
+#          server/deepseek_ocr_webui/{app.py,config.py,engines/,judges.py,mcp_server.py}
+kind: architecture
+direction: LR
+theme: light
+title: DeepSeek-OCR-WebUI v5.0 · Architecture
+subtitle: Rendering and storage in the browser; admission + judges on the server; vLLM or transformers engine
+footer: Binds 127.0.0.1 by default · model revision pinned · MCP and WebUI share one HTTP API
+
+groups:
+  - {id: web, label: Browser · Vue 3 WebUI, kind: team}
+  - {id: api, label: FastAPI · deepseek_ocr_webui, kind: trust}
+  - {id: eng, label: Engine (pick one), kind: stage}
+
+nodes:
+  - {id: user,   label: User,              icon: "glyph:user", sub: PDF / image}
+  - {id: worker, label: pdf.js Web Worker, icon: "glyph:worker", group: web, sub: JPEG pages · long edge 2304px}
+  - {id: idb,    label: IndexedDB,         icon: "glyph:db",     group: web, sub: Dexie storage}
+  - {id: queue,  label: OCR queue,         icon: "glyph:queue",  group: web, sub: p-queue}
+  - {id: export, label: Export,            icon: "glyph:file",   group: web, sub: Markdown / DOCX / PDF}
+  - {id: mcp,    label: MCP server,        icon: "glyph:agent",  sub: ocr_image / ocr_pdf / health, layer: 2}
+
+  - {id: http,   label: HTTP API,          icon: "glyph:gateway", group: api, sub: /api/ocr · /api/ocr/pdf (NDJSON) · legacy /ocr}
+  - {id: health, label: Readiness,         icon: "glyph:monitor", group: api, sub: /health 503 until warm · /api/capabilities}
+  - {id: admit,  label: Admission,         icon: "glyph:firewall", group: api, sub: queue cap / per client / per IP}
+  - {id: sniff,  label: Upload sniff + pixel gate, icon: "glyph:shield", group: api}
+  - {id: judge,  label: Per-page judges,   icon: "glyph:audit",  group: api, sub: repeat / loop / cutoff / empty}
+
+  - {id: vllm,   label: vLLM engine,       icon: "glyph:stream", group: eng, sub: OpenAI stream · NGram anti-repeat · least-busy URL}
+  - {id: vserve, label: vllm serve,        icon: "glyph:service", group: eng, sub: managed or external}
+  - {id: hf,     label: transformers engine, icon: "glyph:container", group: eng, sub: CUDA/MPS/CPU · repeat StoppingCriteria}
+  - {id: model,  label: DeepSeek-OCR-2,    icon: "glyph:model", sub: deepseek-ai · revision pinned, pulse: true}
+
+edges:
+  - {from: user,   to: worker, flow: request, label: import}
+  - {from: worker, to: idb,    flow: write,   label: pages}
+  - {from: idb,    to: queue,  flow: read}
+  - {from: queue,  to: http,   flow: request, label: POST /api/ocr}
+  - {from: mcp,    to: http,   flow: request}
+  - {from: http,   to: health, flow: aux, static: true}
+  - {from: http,   to: admit,  flow: control}
+  - {from: admit,  to: sniff,  flow: control}
+  - {from: sniff,  to: vllm,   flow: request}
+  - {from: sniff,  to: hf,     flow: request}
+  - {from: vllm,   to: vserve, flow: request, label: stream}
+  - {from: vserve, to: model,  flow: data}
+  - {from: hf,     to: model,  flow: data}
+  - {from: vllm,   to: judge,  flow: reply}
+  - {from: hf,     to: judge,  flow: reply}
+  - {from: judge,  to: queue,  flow: reply, label: result + warnings}
+  - {from: queue,  to: export, flow: write}

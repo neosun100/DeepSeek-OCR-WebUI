@@ -2,12 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fileAddService } from './index'
 import { pdfService } from '@/services/pdf'
 import { db } from '@/db/index'
+import { FILE_LIMITS, BYTES_PER_MB } from './limits'
 
 // 1. Mock external dependencies
 vi.mock('@/services/pdf', () => ({
     pdfService: {
         validatePDF: vi.fn(),
-        getPDFMetadata: vi.fn(),
         processPDF: vi.fn()
     }
 }))
@@ -38,8 +38,7 @@ describe('FileAddService', () => {
 
         // Setup default mock implementations
         vi.mocked(pdfService.validatePDF).mockReturnValue({ valid: true })
-        vi.mocked(pdfService.getPDFMetadata).mockResolvedValue({ pageCount: 2 })
-        vi.mocked(pdfService.processPDF).mockResolvedValue(undefined as any)
+        vi.mocked(pdfService.processPDF).mockResolvedValue(2)
         vi.mocked(db.savePageImage).mockResolvedValue(undefined as any)
 
         // Reset URL.createObjectURL
@@ -65,18 +64,31 @@ describe('FileAddService', () => {
         expect(result.error).toContain('is too large')
     })
 
-    it('Validation: PDF allowed up to 100MB', async () => {
-        const midPdf = new File([new ArrayBuffer(50 * 1024 * 1024)], 'mid.pdf', { type: 'application/pdf' })
-        const result = await fileAddService.processFiles([midPdf])
+    // Fake sizes: allocating hundreds of MB in a unit test is pointless, only `size` is checked
+    const pdfOfSize = (bytes: number, name: string) => {
+        const file = new File(['%PDF'], name, { type: 'application/pdf' })
+        Object.defineProperty(file, 'size', { value: bytes })
+        return file
+    }
+
+    it('Validation: PDF allowed up to the PDF limit (was 100MB, now 500MB)', async () => {
+        const result = await fileAddService.processFiles([pdfOfSize(FILE_LIMITS.maxPdfBytes, 'max.pdf')])
+        expect(result.error).toBeUndefined()
+        expect(pdfService.processPDF).toHaveBeenCalled()
+    })
+
+    it('Validation: a 200MB PDF (rejected before #51) is accepted', async () => {
+        const result = await fileAddService.processFiles([pdfOfSize(200 * BYTES_PER_MB, 'big.pdf')])
         expect(result.error).toBeUndefined()
     })
 
-    it('Validation: should throw error if PDF exceeds 100MB', async () => {
-        const hugePdf = new File([new ArrayBuffer(101 * 1024 * 1024)], 'huge.pdf', { type: 'application/pdf' })
-        const result = await fileAddService.processFiles([hugePdf])
+    it('Validation: should throw error if PDF exceeds the limit, reporting actual and max size', async () => {
+        const result = await fileAddService.processFiles([pdfOfSize(FILE_LIMITS.maxPdfBytes + 1, 'huge.pdf')])
 
         expect(result.success).toBe(false)
         expect(result.error).toContain('is too large')
+        expect(result.error).toContain('Maximum size is 500MB')
+        expect(pdfService.processPDF).not.toHaveBeenCalled()
     })
 
     it('Validation: should throw error if file type is unsupported', async () => {
@@ -189,7 +201,7 @@ describe('FileAddService', () => {
 
     it('should throw error when PDF validation fails', async () => {
         const { pdfService } = await import('@/services/pdf')
-        vi.mocked(pdfService.validatePDF).mockReturnValue({ valid: false, error: 'Invalid PDF structure' })
+        vi.mocked(pdfService.processPDF).mockRejectedValue(new Error('Invalid PDF structure'))
         const mockFile = new File([''], 'bad.pdf', { type: 'application/pdf' })
         const result = await fileAddService.processFiles([mockFile])
         expect(result.success).toBe(false)
@@ -198,7 +210,7 @@ describe('FileAddService', () => {
 
     it('should throw error when PDF page count is 0', async () => {
         const { pdfService } = await import('@/services/pdf')
-        vi.mocked(pdfService.getPDFMetadata).mockResolvedValue({ pageCount: 0 })
+        vi.mocked(pdfService.processPDF).mockResolvedValue(0)
         const mockFile = new File([''], 'empty.pdf', { type: 'application/pdf' })
         const result = await fileAddService.processFiles([mockFile])
         expect(result.success).toBe(false)

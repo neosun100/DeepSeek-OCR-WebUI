@@ -1,10 +1,9 @@
-// OCR Service - Placeholder implementation
-// This service will handle text extraction from images using various OCR providers
+// OCR Service: queues page OCR tasks and drives them through the provider with retry logic
 
 import { DeepSeekOCRProvider } from './providers'
 export * from './types'
 import type { OCRProvider, OCRResult, OCROptions } from './types'
-import { QueueFullError } from './types'
+import { ModelLoadingError, QueueFullError } from './types'
 
 import { db } from '@/db'
 import { ocrEvents } from './events'
@@ -14,8 +13,36 @@ import { consola } from 'consola'
 
 const ocrLogger = consola.withTag('OCR')
 
+/** Statuses of pages whose OCR was in flight and must be resumed after an interruption. */
+const RESUME_STATUSES = ['pending_ocr', 'recognizing']
+
+/** Transient network failures (fetch TypeError) retried before the page is marked as failed. */
+const MAX_NETWORK_RETRIES = 3
+
+function isDocumentHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+}
+
+/**
+ * fetch() rejects with a TypeError on network-level failures ("Failed to fetch" / "Load failed" /
+ * "NetworkError ..."). Browsers drop or freeze connections of background tabs (issue #47), so
+ * these are treated as transient.
+ */
+function isNetworkError(error: unknown): boolean {
+  return error instanceof TypeError
+}
+
+export interface ResumeStats {
+  resumed: number
+  skipped: number
+  missingImage: number
+}
+
 export class OCRService {
   private providers: Map<string, OCRProvider> = new Map()
+  /** pageId → token of the task queued by this service; used to find orphaned pages on resume */
+  private inflight: Map<string, symbol> = new Map()
+  private visibilityWaiters: Set<() => void> = new Set()
 
   constructor() {
     this.registerProvider('deepseek', new DeepSeekOCRProvider())
@@ -26,6 +53,13 @@ export class OCRService {
   }
 
   /**
+   * Whether this service currently has a queued/running task for the page.
+   */
+  isInFlight(pageId: string): boolean {
+    return this.inflight.has(pageId)
+  }
+
+  /**
    * Queue an OCR task for a page
    */
   async queueOCR(
@@ -33,22 +67,32 @@ export class OCRService {
     imageData: Blob | string,
     options?: OCROptions
   ): Promise<void> {
-    // Check OCR service availability before queuing
+    // Check OCR service availability before queuing.
+    // isHealthy is true while the model is still loading ('starting'): the task is queued and waits.
     const healthStore = useHealthStore()
 
-    // Reject if service is unavailable (network error, API down)
     if (!healthStore.isHealthy) {
-      const error = new Error('OCR service is currently unavailable. Please try again later.')
+      const error = healthStore.isModelError
+        ? new Error(`OCR model is unavailable: ${healthStore.loadError || 'model failed to load'}`)
+        : new Error('OCR service is currently unavailable. Please try again later.')
       ocrEvents.emit('ocr:error', { pageId, error })
       throw error
     }
 
     ocrEvents.emit('ocr:queued', { pageId })
 
+    const token = Symbol(pageId)
+    this.inflight.set(pageId, token)
+
     // Fire and forget - processing happens in queue
     queueManager.addOCRTask(pageId, async (signal) => {
-      await this.processOCRWithRetry(pageId, imageData, options, signal)
+      try {
+        await this.processOCRWithRetry(pageId, imageData, options, signal)
+      } finally {
+        if (this.inflight.get(pageId) === token) this.inflight.delete(pageId)
+      }
     }).catch(err => {
+      if (this.inflight.get(pageId) === token) this.inflight.delete(pageId)
       ocrLogger.error(`[OCRService] Task error for ${pageId}:`, err)
     })
   }
@@ -80,6 +124,7 @@ export class OCRService {
   ): Promise<void> {
     const retryInterval = 5000
     const healthStore = useHealthStore()
+    const attempt = { networkFailures: 0 }
 
     while (true) {
       if (signal.aborted) return
@@ -90,7 +135,13 @@ export class OCRService {
         continue
       }
 
-      const shouldContinue = await this.tryProcessOCR(pageId, imageData, options, signal, retryInterval)
+      if (healthStore.isStarting) {
+        ocrLogger.info(`[OCRService] OCR model is loading, waiting ${retryInterval}ms for page ${pageId}`)
+        await this.delayWithSignal(retryInterval, signal)
+        continue
+      }
+
+      const shouldContinue = await this.tryProcessOCR(pageId, imageData, options, signal, retryInterval, attempt)
       if (!shouldContinue) return
     }
   }
@@ -103,7 +154,8 @@ export class OCRService {
     imageData: Blob | string,
     options: OCROptions | undefined,
     signal: AbortSignal,
-    retryInterval: number
+    retryInterval: number,
+    attempt: { networkFailures: number }
   ): Promise<boolean> {
     try {
       const result = await this.processImage(imageData, 'deepseek', { ...options, signal })
@@ -114,17 +166,55 @@ export class OCRService {
       return false
     } catch (error) {
       if (signal.aborted) return false
+      return this.handleAttemptError(pageId, error, signal, retryInterval, attempt)
+    }
+  }
 
-      if (error instanceof QueueFullError) {
-        ocrLogger.warn(`[OCRService] OCR task for page ${pageId} failed with 429, retrying in ${retryInterval}ms...`)
+  /**
+   * Decide whether a failed attempt is retried (returns true) or reported as page error (throws).
+   */
+  private async handleAttemptError(
+    pageId: string,
+    error: unknown,
+    signal: AbortSignal,
+    retryInterval: number,
+    attempt: { networkFailures: number }
+  ): Promise<boolean> {
+    if (error instanceof QueueFullError) {
+      ocrLogger.warn(`[OCRService] OCR task for page ${pageId} failed with 429, retrying in ${retryInterval}ms...`)
+      await this.delayWithSignal(retryInterval, signal)
+      return true
+    }
+
+    if (error instanceof ModelLoadingError) {
+      const wait = error.retryAfterMs ?? retryInterval
+      ocrLogger.warn(`[OCRService] OCR model still loading (503) for page ${pageId}, retrying in ${wait}ms...`)
+      await this.delayWithSignal(wait, signal)
+      return true
+    }
+
+    if (isNetworkError(error)) {
+      if (isDocumentHidden()) {
+        // Background tab: the browser may have dropped the connection. Do not burn a retry,
+        // wait until the user is back and resubmit (issue #47).
+        ocrLogger.warn(`[OCRService] Network error for page ${pageId} while tab hidden; retrying when visible`, error)
+        await this.waitForVisible(signal)
+        return true
+      }
+      if (attempt.networkFailures < MAX_NETWORK_RETRIES) {
+        attempt.networkFailures++
+        ocrLogger.warn(
+          `[OCRService] Network error for page ${pageId}, retry ${attempt.networkFailures}/${MAX_NETWORK_RETRIES} in ${retryInterval}ms`,
+          error
+        )
         await this.delayWithSignal(retryInterval, signal)
         return true
       }
-
-      const err = error instanceof Error ? error : new Error(String(error))
-      ocrEvents.emit('ocr:error', { pageId, error: err })
-      throw err
     }
+
+    const err = error instanceof Error ? error : new Error(String(error))
+    ocrEvents.emit('ocr:error', { pageId, error: err })
+    throw err
   }
 
   /**
@@ -146,6 +236,59 @@ export class OCRService {
 
       signal.addEventListener('abort', onAbort, { once: true })
     })
+  }
+
+  /**
+   * Resolve when the document is visible again (signalled by notifyVisible) or on abort.
+   */
+  private waitForVisible(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      if (signal.aborted || !isDocumentHidden()) {
+        resolve()
+        return
+      }
+      const done = () => {
+        this.visibilityWaiters.delete(done)
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      this.visibilityWaiters.add(done)
+      signal.addEventListener('abort', done, { once: true })
+    })
+  }
+
+  /**
+   * Wake tasks that were waiting for the tab to become visible.
+   */
+  notifyVisible(): void {
+    for (const wake of [...this.visibilityWaiters]) wake()
+  }
+
+  /**
+   * Called when the tab becomes visible again (App.vue `visibilitychange`, issue #47):
+   * 1. wake tasks parked on a background network error,
+   * 2. refresh health right away (background timers were throttled, the state may be stale),
+   * 3. re-queue pages still marked pending/recognizing that no longer have a task
+   *    (e.g. the task was lost while the tab was frozen).
+   */
+  async resumeOnVisible(pages: Array<{ id: string; status: string }>): Promise<ResumeStats> {
+    this.notifyVisible()
+
+    const healthStore = useHealthStore()
+    try {
+      await healthStore.checkNow()
+    } catch (error) {
+      // Resume still proceeds; queueOCR re-checks availability with the last known state
+      ocrLogger.warn('[OCRService] Health re-check on visibility failed, using last known state', error)
+    }
+
+    const orphans = pages.filter(p => RESUME_STATUSES.includes(p.status) && !this.isInFlight(p.id))
+    const stats = await this.resumePages(orphans)
+    stats.skipped += pages.length - orphans.length
+    if (stats.resumed > 0 || stats.missingImage > 0) {
+      ocrLogger.info('[OCRService] Resumed OCR after tab became visible', stats)
+    }
+    return stats
   }
 
   async processImage(
@@ -220,23 +363,42 @@ export class OCRService {
    */
   async resumeBatchOCR(
     pages: Array<{ id: string; status: string }>
-  ): Promise<void> {
-    const resumeStatuses = ['pending_ocr', 'recognizing']
+  ): Promise<ResumeStats> {
+    const targets = pages.filter(p => RESUME_STATUSES.includes(p.status))
+    const stats = await this.resumePages(targets)
+    stats.skipped += pages.length - targets.length
+    return stats
+  }
+
+  /**
+   * Re-queue the given pages. A page whose image is gone is reported as an explicit
+   * page error instead of being skipped silently (it would otherwise stay "pending" forever).
+   */
+  private async resumePages(pages: Array<{ id: string; status: string }>): Promise<ResumeStats> {
+    const stats: ResumeStats = { resumed: 0, skipped: 0, missingImage: 0 }
 
     for (const page of pages) {
-      if (resumeStatuses.includes(page.status)) {
-        try {
-          const imageBlob = await db.getPageImage(page.id)
-          if (imageBlob) {
-            await this.queueOCR(page.id, imageBlob, {
-              prompt_type: 'document'
-            })
-          }
-        } catch (error) {
-          console.error(`[OCRService] Failed to resume task for ${page.id}:`, error)
+      try {
+        const imageBlob = await db.getPageImage(page.id)
+        if (!imageBlob) {
+          stats.missingImage++
+          const error = new Error('Cannot resume OCR: page image is missing from local storage. Please re-import the file.')
+          ocrLogger.error(`[OCRService] Resume failed for ${page.id}: image missing`)
+          ocrEvents.emit('ocr:error', { pageId: page.id, error })
+          continue
         }
+        await this.queueOCR(page.id, imageBlob, {
+          prompt_type: 'document'
+        })
+        stats.resumed++
+      } catch (error) {
+        // queueOCR already emitted ocr:error for availability failures
+        stats.skipped++
+        ocrLogger.error(`[OCRService] Failed to resume task for ${page.id}:`, error)
       }
     }
+
+    return stats
   }
 }
 

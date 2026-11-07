@@ -1,0 +1,104 @@
+[project]
+name = "deepseek-ocr-webui"
+version = "5.0.0"
+description = "Self-hosted DeepSeek-OCR-2 service: FastAPI backend (vLLM / transformers on CUDA, Apple Silicon MPS, CPU) + Vue 3 WebUI"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<3.14"
+authors = [{ name = "neosun100" }, { name = "cloudman6" }]
+# 核心依赖只放「服务本体」需要的；推理引擎走 extras（hf / vllm 互斥，见 tool.uv.conflicts）
+dependencies = [
+    "fastapi>=0.120",
+    "uvicorn[standard]>=0.38",
+    "python-multipart>=0.0.20",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "loguru>=0.7.3",
+    "httpx>=0.28",
+    "pillow>=11.0",
+    "pymupdf>=1.26",
+]
+
+[project.optional-dependencies]
+# transformers 路径：CUDA / Apple Silicon MPS / CPU。
+# transformers 钉 4.46.3：上游 OCR-2 远程代码按这个版本写的（HF model card 原文），
+# 新版 transformers 的 cache/RoPE 接口变化会让远程代码失效。torch 2.15 已在 M5 Max 实测可用。
+hf = [
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "transformers==4.46.3",
+    "tokenizers==0.20.3",
+    "accelerate>=1.0",
+    "einops>=0.8",
+    "addict>=2.4",
+    "easydict>=1.13",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.26",
+]
+# vLLM 路径（仅 Linux + NVIDIA）：上游 vLLM 原生支持 DeepSeek-OCR-2（≥0.16），自带 transformers 版本
+vllm = ["vllm>=0.16"]
+mcp = ["mcp>=2.3,<3"]
+
+[project.scripts]
+deepseek-ocr-webui = "deepseek_ocr_webui.__main__:main"
+deepseek-ocr-webui-mcp = "deepseek_ocr_webui.mcp_server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-timeout>=2.3",
+    "pytest-cov>=6.0",
+    "ruff==0.17.4",
+    "pytest-xdist>=3.6",
+]
+
+[tool.uv]
+# hf 钉 transformers==4.46.3，vllm 自带更新的 transformers ⇒ 两者不能装在同一环境
+conflicts = [[{ extra = "hf" }, { extra = "vllm" }]]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "server"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -p no:cacheprovider"
+timeout = 120
+markers = [
+    "e2e: 打真实运行中的服务（DSOCR_BASE 未设或不可达时 skip）",
+    "gpu: 需要真实模型权重 + 加速器（DSOCR_REAL_MODEL=1 才跑）",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["server", "tests"]
+extend-exclude = ["archive", "frontend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE", "SIM", "RUF"]
+ignore = [
+    "S101",   # 测试里用 assert
+    "E501",   # 代码行宽由 ruff format 管；剩下的是中文注释 / 文档串（CJK 双宽），硬折行反而难读
+    "RUF001", # 中文全角标点出现在字符串里是有意的（提示词 / 错误信息）
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "BLE"]
+
+# Linux 上 torch 走 cu126 官方 index：PyPI 默认 wheel 是 cu130 ⇒ 要求宿主机驱动 ≥ 580（#46 同类问题，
+# 2026-11-07 在 T4 实测 torch 2.14.0+cu130）。cu126 toolkit 要求 ≥ 560，CUDA 12 minor-version 兼容可放宽到 ≥ 525。
+# macOS（MPS）与 Windows 仍走 PyPI。
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux'" }]

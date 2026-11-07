@@ -32,6 +32,43 @@
     </div>
 
     <NCollapseTransition :show="expanded">
+      <div
+        v-if="finishReason || warningList.length > 0"
+        class="output-checks"
+        data-testid="raw-text-output-checks"
+      >
+        <div
+          v-if="finishReason"
+          class="finish-reason"
+          data-testid="raw-text-finish-reason"
+          :data-reason="finishReason"
+        >
+          <span class="check-label">{{ t('ocrRawTextPanel.finishReason') }}:</span>
+          {{ finishReasonText }}
+        </div>
+        <div
+          v-if="warningList.length > 0"
+          class="warning-list"
+        >
+          <span class="check-label">{{ t('ocrRawTextPanel.warnings') }}:</span>
+          <div
+            v-for="w in warningList"
+            :key="w.code"
+            :class="['warning-item', isFailingWarning(w) ? 'is-failing' : 'is-hint']"
+            data-testid="raw-text-warning"
+            :data-code="w.code"
+          >
+            <NTag
+              size="tiny"
+              :type="isFailingWarning(w) ? 'warning' : 'info'"
+              :bordered="false"
+            >
+              {{ isFailingWarning(w) ? w.code : t('ocrRawTextPanel.hint') }}
+            </NTag>
+            <span class="warning-message">{{ w.message }}</span>
+          </div>
+        </div>
+      </div>
       <div class="panel-content">
         <NScrollbar
           style="max-height: 200px"
@@ -45,19 +82,44 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton, NIcon, NCollapseTransition, NScrollbar, useMessage } from 'naive-ui'
+import { NButton, NIcon, NCollapseTransition, NScrollbar, NTag, useMessage } from 'naive-ui'
 import { CopyOutline, Copy, ChevronForward, Checkmark } from '@vicons/ionicons5'
 import { uiLogger } from '@/utils/logger'
 import { PRIMARY_COLOR } from '@/theme/vars'
+import { isFailingWarning, normalizeWarnings, type OCRWarning } from '@/services/ocr/types'
 
 interface Props {
   text: string
+  /** v5 output-check warnings; absent for v4 results */
+  warnings?: OCRWarning[]
+  /** v5 finish_reason: stop | length | repetition_cut */
+  finishReason?: string | null
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  warnings: () => [],
+  finishReason: null
+})
 const { t } = useI18n()
+
+// Failing warnings first, informational hints (near_empty, bbox_invalid) after
+const warningList = computed(() => {
+  const list = normalizeWarnings(props.warnings)
+  return [...list.filter(isFailingWarning), ...list.filter(w => !isFailingWarning(w))]
+})
+
+const FINISH_REASON_KEYS: Record<string, string> = {
+  stop: 'ocrRawTextPanel.finishStop',
+  length: 'ocrRawTextPanel.finishLength',
+  repetition_cut: 'ocrRawTextPanel.finishRepetitionCut'
+}
+
+const finishReasonText = computed(() => {
+  const key = props.finishReason ? FINISH_REASON_KEYS[props.finishReason] : undefined
+  return key ? t(key) : (props.finishReason ?? '')
+})
 const expanded = ref(true)
 const message = useMessage()
 const isCopyHovered = ref(false)
@@ -133,6 +195,34 @@ async function handleCopy() {
 
 .title-row .n-icon.rotated {
   transform: rotate(90deg);
+}
+
+.output-checks {
+  padding: 8px 12px;
+  border-top: 1px solid var(--n-border-color);
+  font-size: 12px;
+  line-height: 1.6;
+  background: #fffdf5;
+}
+
+.check-label {
+  font-weight: 500;
+  margin-right: 4px;
+}
+
+.warning-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.warning-item.is-hint {
+  opacity: 0.8;
+}
+
+.warning-message {
+  word-break: break-word;
 }
 
 .panel-content {

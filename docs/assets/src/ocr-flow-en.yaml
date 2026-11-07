@@ -1,0 +1,41 @@
+# One PDF page from upload to export, English edition (arcflow flowchart spec: relations only, no coordinates)
+# Structure and edges mirror ocr-flow.yaml exactly; only reader-facing text is translated.
+# Render: cd ~/Code/arcflow && uv run --with pyyaml python -m arcflow.cli render <this file> -o docs/assets/ocr-flow-en.svg
+#         then add --theme dark -o docs/assets/ocr-flow-en-dark.svg
+kind: flowchart
+direction: TB
+theme: light
+title: OCR flow for one PDF page
+subtitle: "Two decisions: queue full ⇒ wait and retry; failure warning ⇒ flag the page, still return the result"
+footer: Repeat detection runs during streaming inference and cuts off on a hit, without waiting for the full page
+
+nodes:
+  - {id: imp,     label: Import PDF,          icon: "glyph:file"}
+  - {id: render,  label: Worker renders page, icon: "glyph:worker", sub: JPEG · long edge 2304px}
+  - {id: enq,     label: Enqueue,             icon: "glyph:queue"}
+  - {id: post,    label: POST /api/ocr,       icon: "glyph:gateway"}
+  - {id: q429,    label: "Queue full (429)?",  shape: diamond, icon: "glyph:decision"}
+  - {id: wait,    label: Wait and retry,      icon: "glyph:wait"}
+  - {id: infer,   label: Engine inference,    icon: "glyph:model", sub: streaming repeat check · cut off on hit, pulse: true}
+  - {id: ground,  label: Grounding parse,     icon: "glyph:batch", sub: layout boxes + cleanup}
+  - {id: judge,   label: Per-page judges,     icon: "glyph:audit", sub: ok / warnings}
+  - {id: qwarn,   label: "Any failure warning?",  shape: diamond, icon: "glyph:decision"}
+  - {id: mark,    label: Flag page,           icon: "glyph:alert", sub: result still returned}
+  - {id: preview, label: Frontend preview,    icon: "glyph:browser", sub: layout box overlay}
+  - {id: export,  label: Export MD / DOCX / PDF, icon: "glyph:end"}
+
+edges:
+  - {from: imp,     to: render,  flow: control}
+  - {from: render,  to: enq,     flow: control}
+  - {from: enq,     to: post,    flow: request}
+  - {from: post,    to: q429,    flow: control}
+  - {from: q429,    to: wait,    flow: error,   label: "yes"}
+  - {from: wait,    to: post,    flow: aux,     label: retry}
+  - {from: q429,    to: infer,   flow: request, label: "no"}
+  - {from: infer,   to: ground,  flow: data}
+  - {from: ground,  to: judge,   flow: data}
+  - {from: judge,   to: qwarn,   flow: control}
+  - {from: qwarn,   to: mark,    flow: error,   label: "yes"}
+  - {from: qwarn,   to: preview, flow: reply,   label: "no"}
+  - {from: mark,    to: preview, flow: reply}
+  - {from: preview, to: export,  flow: write}

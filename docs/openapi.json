@@ -1,0 +1,769 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DeepSeek-OCR-WebUI API",
+    "description": "自托管的 DeepSeek-OCR-2 服务。引擎：vLLM（CUDA，连续批处理）或 transformers（CUDA / Apple Silicon / CPU）。\n\n**限额**：单文件 ≤ 200 MB · 图片 ≤ 80 MP · PDF 单次 ≤ 500 页（144 DPI 栅格化，每页 ≤ 60 MP）· 单页生成 ≤ 8192 token · 单请求超时 600s。\n\n**错误格式**：`{\"success\": false, \"detail\": {\"error\", \"message\", \"actual\", \"limit\"}, \"request_id\"}`。\n\n**产物判据**：每页返回 `ok` 与 `warnings[]`（repetition / repetition_cut / truncated / coordinate_loop / bbox_invalid / empty_output / near_empty）。HTTP 200 只代表请求被处理，请以 `ok` 判断产物是否可信。",
+    "version": "5.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "就绪与队列状态",
+        "description": "模型加载与预热完成前返回 **503**（`status=starting|error`）；就绪后 200，`status` ∈ healthy / busy / full。带 `X-Client-ID` 头时返回该客户端的排队位置。",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "加载中或不可用"
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "存活探针",
+        "description": "进程存活即返回 200。",
+        "operationId": "live_health_live_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Live Health Live Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/capabilities": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "能力声明",
+        "description": "识别模式、限额、当前引擎与已知弱项（附公开榜单证据）。",
+        "operationId": "capabilities_api_capabilities_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ocr": {
+      "post": {
+        "tags": [
+          "ocr"
+        ],
+        "summary": "图片 OCR",
+        "description": "上传一张图片（PNG/JPEG/WebP/BMP/TIFF/GIF，按文件头识别），返回识别文本、原始输出（含 grounding 标记）、版面框（像素坐标）与逐页判据。\n\n- `prompt_type`：document（默认）· ocr · free · figure · describe · find · freeform\n- `find_term`：find 模式的关键词 · `custom_prompt`：freeform 模式的提示词\n- `grounding`：document / ocr / freeform 可切换是否输出版面框；不传 = 模式默认\n- 头 `X-Client-ID`：同一客户端的并发上限与排队位置",
+        "operationId": "api_ocr_api_ocr_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_api_ocr_api_ocr_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OCRResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "文件 / 像素超限"
+          },
+          "415": {
+            "description": "不支持的类型"
+          },
+          "422": {
+            "description": "参数不合法"
+          },
+          "429": {
+            "description": "排队已满 / 并发超限"
+          },
+          "503": {
+            "description": "模型加载中 / 显存不足"
+          },
+          "504": {
+            "description": "推理超时"
+          }
+        }
+      }
+    },
+    "/ocr": {
+      "post": {
+        "tags": [
+          "compat"
+        ],
+        "summary": "图片 OCR（v4 兼容别名）",
+        "description": "与 `/api/ocr` 完全相同。",
+        "operationId": "legacy_ocr_ocr_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_legacy_ocr_ocr_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OCRResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/ocr/pdf": {
+      "post": {
+        "tags": [
+          "ocr"
+        ],
+        "summary": "PDF 逐页 OCR（NDJSON 流）",
+        "description": "逐页栅格化（144 DPI）并识别，`application/x-ndjson` 每行一个事件：\n\n- `{\"type\":\"start\",\"page_count\",\"pages\":[1,2,…]}`\n- `{\"type\":\"page\",\"page\":1, …与 /api/ocr 相同的字段}`（按页序输出）\n- `{\"type\":\"heartbeat\"}`（每 15 s，防反向代理空闲断开）\n- `{\"type\":\"error\",\"page\",\"detail\"}`（单页失败不中断其余页）\n- `{\"type\":\"done\",\"ok_pages\",\"warned_pages\",\"failed_pages\",\"elapsed_s\"}`\n\n`pages` 参数如 `1-3,5`；输入校验（加密 / 页数 / 像素）在开流之前完成，失败直接返回 4xx。",
+        "operationId": "api_ocr_pdf_api_ocr_pdf_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_api_ocr_pdf_api_ocr_pdf_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/x-ndjson": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pdf-to-images": {
+      "post": {
+        "tags": [
+          "compat"
+        ],
+        "summary": "PDF → 页图（v4 兼容）",
+        "description": "返回每页 base64 PNG。deprecated：大文件请用 `/api/ocr/pdf`。上限 500 页。",
+        "operationId": "legacy_pdf_to_images_pdf_to_images_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_legacy_pdf_to_images_pdf_to_images_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Legacy Pdf To Images Pdf To Images Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Body_api_ocr_api_ocr_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "图片文件"
+          },
+          "prompt_type": {
+            "type": "string",
+            "title": "Prompt Type",
+            "description": "识别模式",
+            "default": "document"
+          },
+          "find_term": {
+            "type": "string",
+            "title": "Find Term",
+            "description": "find 模式关键词",
+            "default": ""
+          },
+          "custom_prompt": {
+            "type": "string",
+            "title": "Custom Prompt",
+            "description": "freeform 模式提示词",
+            "default": ""
+          },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding",
+            "description": "是否输出版面框（不传 = 模式默认）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_api_ocr_api_ocr_post"
+      },
+      "Body_api_ocr_pdf_api_ocr_pdf_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "PDF 文件"
+          },
+          "prompt_type": {
+            "type": "string",
+            "title": "Prompt Type",
+            "description": "识别模式",
+            "default": "document"
+          },
+          "find_term": {
+            "type": "string",
+            "title": "Find Term",
+            "description": "find 模式关键词",
+            "default": ""
+          },
+          "custom_prompt": {
+            "type": "string",
+            "title": "Custom Prompt",
+            "description": "freeform 模式提示词",
+            "default": ""
+          },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding",
+            "description": "是否输出版面框（不传 = 模式默认）"
+          },
+          "pages": {
+            "type": "string",
+            "title": "Pages",
+            "description": "页码范围，如 1-3,5；空 = 全部",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_api_ocr_pdf_api_ocr_pdf_post"
+      },
+      "Body_legacy_ocr_ocr_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "图片文件"
+          },
+          "prompt_type": {
+            "type": "string",
+            "title": "Prompt Type",
+            "description": "识别模式",
+            "default": "document"
+          },
+          "find_term": {
+            "type": "string",
+            "title": "Find Term",
+            "description": "find 模式关键词",
+            "default": ""
+          },
+          "custom_prompt": {
+            "type": "string",
+            "title": "Custom Prompt",
+            "description": "freeform 模式提示词",
+            "default": ""
+          },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding",
+            "description": "是否输出版面框（不传 = 模式默认）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_legacy_ocr_ocr_post"
+      },
+      "Body_legacy_pdf_to_images_pdf_to_images_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_legacy_pdf_to_images_pdf_to_images_post"
+      },
+      "Box": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "版面类型（document 模式）或识别出的文字 / 关键词（ocr / find 模式）"
+          },
+          "box": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Box",
+            "description": "[x1, y1, x2, y2] 原图像素坐标"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "label",
+          "box"
+        ],
+        "title": "Box"
+      },
+      "CapabilitiesResponse": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "model": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Model"
+          },
+          "engine": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Engine"
+          },
+          "modes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Modes"
+          },
+          "limits": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Limits"
+          },
+          "known_weak": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Known Weak"
+          },
+          "inputs": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "title": "Inputs"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "version",
+          "model",
+          "engine",
+          "modes",
+          "limits",
+          "known_weak",
+          "inputs"
+        ],
+        "title": "CapabilitiesResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "starting / error / healthy / busy / full"
+          },
+          "ready": {
+            "type": "boolean",
+            "title": "Ready"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "model_version": {
+            "type": "string",
+            "title": "Model Version"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "model_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Revision"
+          },
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend",
+            "description": "设备：cuda / mps / cpu（v4 兼容字段）"
+          },
+          "engine": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Engine"
+          },
+          "model_loaded": {
+            "type": "boolean",
+            "title": "Model Loaded"
+          },
+          "load_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Load Error"
+          },
+          "warmup": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Warmup"
+          },
+          "ocr_queue": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Ocr Queue"
+          },
+          "rate_limits": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Rate Limits"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "status",
+          "ready",
+          "version",
+          "model_version",
+          "model_id",
+          "model_revision",
+          "backend",
+          "engine",
+          "model_loaded",
+          "load_error",
+          "warmup",
+          "ocr_queue",
+          "rate_limits"
+        ],
+        "title": "HealthResponse"
+      },
+      "OCRResponse": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "description": "产物判据是否全部通过（有失败型 warning 时为 false，结果仍然返回）"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "description": "去掉 grounding 标记后的可读文本"
+          },
+          "raw_text": {
+            "type": "string",
+            "title": "Raw Text",
+            "description": "模型原始输出（含 <|ref|>/<|det|> 标记；检出复读时已截掉复读区）"
+          },
+          "boxes": {
+            "items": {
+              "$ref": "#/components/schemas/Box"
+            },
+            "type": "array",
+            "title": "Boxes"
+          },
+          "image_dims": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Image Dims"
+          },
+          "prompt_type": {
+            "type": "string",
+            "title": "Prompt Type"
+          },
+          "finish_reason": {
+            "type": "string",
+            "title": "Finish Reason",
+            "description": "stop / length / repetition_cut"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/Warning_"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "content_chars": {
+            "type": "integer",
+            "title": "Content Chars",
+            "description": "有效字母数字个数（中文按字）"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "success",
+          "ok",
+          "text",
+          "raw_text",
+          "boxes",
+          "image_dims",
+          "prompt_type",
+          "finish_reason",
+          "warnings",
+          "content_chars",
+          "metadata"
+        ],
+        "title": "OCRResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "Warning_": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "repetition / repetition_cut / truncated / coordinate_loop / bbox_invalid / empty_output / near_empty"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "Warning_"
+      }
+    }
+  }
+}

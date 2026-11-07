@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="DeepSeek-OCR-WebUI">
+  <title>DeepSeek-OCR-WebUI</title>
+  <!-- 隐喻：文档页 + 扫描光束 + 识别框（OCR = 扫描后把一行字框出来）。
+       配色取前端主色 #18a058 与 AppHeader 渐变终点 #0d7a3e。
+       动画纪律：关键帧只在 from 侧偏离基础样式（fill-mode: backwards），
+       因此静态渲染（rsvg / 无动画环境 / reduced-motion）就是完整定格：光束停在被框住的那一行上。 -->
+  <defs>
+    <!-- 背景用纯色，不用渐变 / 斜切面：实测 Chrome 下大面积渐变与斜边抗锯齿随位置变化，
+         prove_animated 的阴性对照会出 0.001% 噪声（纯色为 0.000%）。 -->
+    <linearGradient id="beam" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7cf0b0" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#2fd07c" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#7cf0b0" stop-opacity="0"/>
+    </linearGradient>
+    <style>
+      .beam { animation: scan 4s cubic-bezier(.45,0,.25,1) infinite backwards; }
+      .box  { transform-box: fill-box; transform-origin: center;
+              animation: lock 4s ease-out infinite backwards; }
+      .hit  { animation: hit 4s ease-out infinite backwards; }
+      /* 只写 from 侧：终点 = 基础样式 */
+      @keyframes scan { 0% { transform: translateY(-150px); opacity: 0; } 12% { opacity: 1; } 55% { transform: none; } }
+      @keyframes lock { 0%, 55% { opacity: 0; transform: scale(1.14); } }
+      @keyframes hit  { 0%, 60% { opacity: .3; } }
+      @media (prefers-reduced-motion: reduce) {
+        .beam, .box, .hit { animation: none; }
+      }
+    </style>
+  </defs>
+
+  <rect width="512" height="512" rx="96" fill="#18a058"/>
+
+  <!-- 文档页（右上折角） -->
+  <path d="M152 96 H316 L376 156 V400 Q376 416 360 416 H152 Q136 416 136 400 V112 Q136 96 152 96 Z" fill="#fff" opacity="0.96"/>
+  <path d="M316 96 V140 Q316 156 332 156 H376 Z" fill="#cfeedd"/>
+
+  <!-- 正文行 -->
+  <g stroke="#18a058" stroke-width="14" stroke-linecap="round" opacity="0.32">
+    <line x1="176" y1="186" x2="290" y2="186"/>
+    <line x1="176" y1="316" x2="336" y2="316"/>
+    <line x1="176" y1="364" x2="300" y2="364"/>
+  </g>
+  <!-- 被识别的那一行 -->
+  <line class="hit" x1="176" y1="251" x2="336" y2="251" stroke="#0d7a3e" stroke-width="16" stroke-linecap="round"/>
+
+  <!-- 扫描光束（定格在被识别行上） -->
+  <g class="beam">
+    <rect x="120" y="221" width="272" height="60" fill="url(#beam)"/>
+    <line x1="120" y1="251" x2="392" y2="251" stroke="#2fd07c" stroke-width="4" stroke-linecap="round" opacity="0.9"/>
+  </g>
+
+  <!-- 识别框：四角括号 -->
+  <path class="box" d="M158 238 V222 Q158 214 166 214 H184 M328 214 H346 Q354 214 354 222 V238 M354 264 V280 Q354 288 346 288 H328 M184 288 H166 Q158 288 158 280 V264"
+        fill="none" stroke="#18a058" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

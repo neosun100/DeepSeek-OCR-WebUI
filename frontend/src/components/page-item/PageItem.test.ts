@@ -20,7 +20,8 @@ vi.mock('@/services/ocr', () => ({
 
 vi.mock('@/db', () => ({
     db: {
-        getPageImage: vi.fn()
+        getPageImage: vi.fn(),
+        getPageOCRSummary: vi.fn().mockResolvedValue(undefined)
     }
 }))
 
@@ -73,6 +74,10 @@ vi.mock('naive-ui', () => ({
         name: 'NIcon',
         props: ['size', 'color'],
         template: '<span><slot></slot></span>'
+    },
+    NTooltip: {
+        name: 'NTooltip',
+        template: '<span><slot name="trigger"></slot><span class="tooltip-body"><slot></slot></span></span>'
     },
     useMessage: () => mocks.message,
     useNotification: () => mocks.notification,
@@ -342,5 +347,45 @@ describe('PageItem.vue', () => {
 
         await scanBtn?.trigger('mouseleave')
         expect((wrapper.vm as any).isScanHovered).toBe(false)
+    })
+
+    describe('OCR output warnings (v5)', () => {
+        const mountWith = (status: Page['status']) => mount(PageItem, {
+            props: { page: { ...mockPage, status } },
+            global: { plugins: [pinia, i18n] }
+        })
+
+        it('shows a warning badge with messages for failing warnings', async () => {
+            vi.mocked(db.getPageOCRSummary).mockResolvedValue({
+                warnings: [
+                    { code: 'repetition_cut', message: 'tail repetition cut' },
+                    { code: 'near_empty', message: 'few chars' }
+                ],
+                finishReason: 'repetition_cut',
+                ok: false
+            })
+            const wrapper = mountWith('completed')
+            await flushPromises()
+            expect(wrapper.find('[data-testid="page-output-warning"]').exists()).toBe(true)
+            const items = wrapper.findAll('[data-testid="page-output-warning-item"]').map(w => w.text())
+            expect(items).toEqual(['tail repetition cut'])
+        })
+
+        it('shows no badge for informational warnings only', async () => {
+            vi.mocked(db.getPageOCRSummary).mockResolvedValue({
+                warnings: [{ code: 'near_empty', message: 'few chars' }, { code: 'bbox_invalid', message: 'bad box' }],
+                finishReason: 'stop',
+                ok: true
+            })
+            const wrapper = mountWith('ocr_success')
+            await flushPromises()
+            expect(wrapper.find('[data-testid="page-output-warning"]').exists()).toBe(false)
+        })
+
+        it('does not query OCR data before OCR finished', async () => {
+            mountWith('pending_ocr')
+            await flushPromises()
+            expect(db.getPageOCRSummary).not.toHaveBeenCalled()
+        })
     })
 })

@@ -21,6 +21,38 @@ export class OCRPage {
   }
 
   /**
+   * Number of fully finished document-generation runs for a page
+   * (the store logs "Generated all successfully" once per run).
+   */
+  async getGenerationDoneCount(pageIndex: number): Promise<number> {
+    return await this.page.evaluate((idx) => {
+      const logs = window.pagesStore?.pages?.[idx]?.logs || [];
+      return logs.filter(l => l.message === 'Generated all successfully').length;
+    }, pageIndex);
+  }
+
+  /**
+   * Wait until the document-generation pipeline started after OCR has fully
+   * finished, i.e. the done-count rises above `previousCount`.
+   *
+   * Why not a status check: page status is not monotonic during generation.
+   * 'completed' is reported when the run starts (doc:gen:start 'all' falls
+   * back to 'completed') and again after DOCX, while PDF is still pending.
+   * The OCR mode selector is enabled in those gaps, so interacting with it
+   * there races with the next status update.
+   */
+  async waitForGenerationDone(pageIndex: number, previousCount: number, timeout: number = 30000) {
+    await this.page.waitForFunction(
+      ({ idx, prev }) => {
+        const logs = window.pagesStore?.pages?.[idx]?.logs || [];
+        return logs.filter(l => l.message === 'Generated all successfully').length > prev;
+      },
+      { idx: pageIndex, prev: previousCount },
+      { timeout }
+    );
+  }
+
+  /**
    * 等待所有页面 OCR 完成
    */
   async waitForAllOCRComplete(timeout: number = 60000) {

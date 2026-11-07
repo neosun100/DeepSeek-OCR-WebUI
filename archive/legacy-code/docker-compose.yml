@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  deepseek-ocr:
+    image: neosun/deepseek-ocr:latest
+    container_name: deepseek-ocr-webui
+    ports:
+      - "8001:8001"
+    shm_size: 8g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m

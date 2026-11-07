@@ -196,4 +196,32 @@ describe('OCRRawTextPanel.vue', () => {
         expect((wrapper.vm as any).isCopied).toBe(false)
         vi.useRealTimers()
     })
+
+    describe('output checks (v5)', () => {
+        it('lists warnings (failing first) and the finish reason', () => {
+            const wrapper = mount(OCRRawTextPanel, {
+                props: {
+                    text: 'x',
+                    finishReason: 'repetition_cut',
+                    warnings: [
+                        { code: 'near_empty', message: 'few chars' },
+                        { code: 'repetition_cut', message: 'tail repetition cut' }
+                    ]
+                },
+                global: { plugins: [i18n] }
+            })
+            const codes = wrapper.findAll('[data-testid="raw-text-warning"]').map(w => w.attributes('data-code'))
+            expect(codes).toEqual(['repetition_cut', 'near_empty'])
+            expect(wrapper.text()).toContain('tail repetition cut')
+            expect(wrapper.find('[data-testid="raw-text-finish-reason"]').attributes('data-reason')).toBe('repetition_cut')
+            expect(wrapper.find('[data-testid="raw-text-finish-reason"]').text()).toContain(
+                i18n.global.t('ocrRawTextPanel.finishRepetitionCut')
+            )
+        })
+
+        it('renders no output-check block for v4 results', () => {
+            const wrapper = mount(OCRRawTextPanel, { props: { text: 'x' }, global: { plugins: [i18n] } })
+            expect(wrapper.find('[data-testid="raw-text-output-checks"]').exists()).toBe(false)
+        })
+    })
 })

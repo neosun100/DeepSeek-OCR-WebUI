@@ -42,7 +42,16 @@ export default {
     fullTooltip: 'Queue Full (Cannot Submit)',
     queue: 'Queue',
     busy: 'Busy',
-    full: 'Full'
+    full: 'Full',
+    starting: 'Model loading',
+    startingTooltip: 'The model is loading / warming up. New tasks wait in the queue and start automatically.',
+    modelError: 'Model unavailable',
+    modelErrorDetail: 'Model unavailable: {0}',
+    unreachableTooltip: 'Cannot reach the OCR service (network error or server down).',
+    engine: 'Engine',
+    device: 'Device',
+    dtype: 'Precision',
+    version: 'Version'
   },
 
   // Header
@@ -213,7 +222,8 @@ export default {
   // Page Item
   pageItem: {
     scanToDocument: 'Scan to Document',
-    deletePage: 'Delete page'
+    deletePage: 'Delete page',
+    outputWarning: 'OCR output may be unreliable'
   },
 
   // OCR Queue Popover
@@ -228,7 +238,9 @@ export default {
     cancelTask: 'Cancel Task',
     taskCancelled: 'Task cancelled',
     tasksCancelled: '{n} tasks cancelled',
-    allTasksCancelled: 'All tasks cancelled'
+    allTasksCancelled: 'All tasks cancelled',
+    modelLoading: 'Model is loading; queued tasks start when it is ready.',
+    modelError: 'Model unavailable: {0}'
   },
 
   // OCR Input Modal
@@ -247,7 +259,13 @@ export default {
     copy: 'Copy',
     noRawText: 'No raw text available',
     copied: 'Copied!',
-    copyFailed: 'Copy failed'
+    copyFailed: 'Copy failed',
+    warnings: 'Output checks',
+    finishReason: 'Finish reason',
+    finishStop: 'Completed',
+    finishLength: 'Hit max length (may be truncated)',
+    finishRepetitionCut: 'Stopped early: repetition cut',
+    hint: 'Hint'
   },
 
   // Error messages

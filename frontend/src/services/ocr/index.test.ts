@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { OCRService, QueueFullError } from './index'
+import { OCRService, QueueFullError, ModelLoadingError } from './index'
 import type { OCRProvider, OCRResult } from './types'
 import { db } from '@/db'
 import { ocrEvents } from './events'
@@ -29,7 +29,11 @@ vi.mock('@/services/queue', () => ({
 const mockHealthStore = {
   isHealthy: true,
   isFull: false,
-  isBusy: false
+  isBusy: false,
+  isStarting: false,
+  isModelError: false,
+  loadError: null as string | null,
+  checkNow: vi.fn().mockResolvedValue(undefined)
 }
 
 vi.mock('@/stores/health', () => ({
@@ -42,6 +46,9 @@ describe('OCRService', () => {
     vi.clearAllMocks()
     mockHealthStore.isFull = false
     mockHealthStore.isHealthy = true
+    mockHealthStore.isStarting = false
+    mockHealthStore.isModelError = false
+    mockHealthStore.loadError = null
   })
   const mockResult: OCRResult = {
     success: true,
@@ -510,9 +517,15 @@ describe('OCRService', () => {
       vi.spyOn(db, 'getPageImage').mockResolvedValue(undefined)
       const queueSpy = vi.spyOn(service, 'queueOCR').mockResolvedValue()
 
-      await service.resumeBatchOCR(pages)
+      const stats = await service.resumeBatchOCR(pages)
 
       expect(queueSpy).not.toHaveBeenCalled()
+      // Explicit page error instead of a silent skip (page would stay "pending" forever)
+      expect(stats.missingImage).toBe(1)
+      expect(ocrEvents.emit).toHaveBeenCalledWith('ocr:error', expect.objectContaining({
+        pageId: 'p1',
+        error: expect.objectContaining({ message: expect.stringContaining('image is missing') })
+      }))
     })
 
     it('should catch error if resume task fails', async () => {
@@ -520,12 +533,10 @@ describe('OCRService', () => {
       const pages = [{ id: 'p1', status: 'recognizing' }] as any[]
 
       vi.spyOn(db, 'getPageImage').mockRejectedValue(new Error('Resume Error'))
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => { })
 
-      await service.resumeBatchOCR(pages)
+      const stats = await service.resumeBatchOCR(pages)
 
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to resume task'), expect.any(Error))
-      consoleSpy.mockRestore()
+      expect(stats).toEqual({ resumed: 0, skipped: 1, missingImage: 0 })
     })
   })
 })
@@ -657,5 +668,129 @@ describe('retry logic', () => {
     await taskPromise
 
     expect(mockProvider.process).not.toHaveBeenCalled()
+  })
+})
+
+describe('v5 states and visibility resume (issue #47)', () => {
+  const okResult: OCRResult = {
+    success: true, text: 't', raw_text: 't', boxes: [], image_dims: { w: 1, h: 1 }, prompt_type: 'document'
+  }
+  let capturedTask: ((signal: AbortSignal) => Promise<void>) | null = null
+  const setVisibility = (v: 'visible' | 'hidden') =>
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v })
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.clearAllMocks()
+    capturedTask = null
+    mockHealthStore.isFull = false
+    mockHealthStore.isHealthy = true
+    mockHealthStore.isStarting = false
+    mockHealthStore.isModelError = false
+    mockHealthStore.loadError = null
+    setVisibility('visible')
+    vi.mocked(queueManager.addOCRTask).mockImplementation(async (_id, fn) => { capturedTask = fn })
+  })
+
+  function serviceWith(process: OCRProvider['process']) {
+    const service = new OCRService()
+    service.registerProvider('deepseek', { name: 'deepseek', process })
+    return service
+  }
+
+  it('allows queueing while the model is starting and waits before sending', async () => {
+    mockHealthStore.isStarting = true
+    const process = vi.fn().mockResolvedValue(okResult)
+    const service = serviceWith(process)
+    await service.queueOCR('p1', new Blob(['x']))
+    const run = capturedTask!(new AbortController().signal)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(process).not.toHaveBeenCalled()
+    mockHealthStore.isStarting = false
+    await vi.advanceTimersByTimeAsync(5000)
+    await run
+    expect(process).toHaveBeenCalledTimes(1)
+    expect(ocrEvents.emit).toHaveBeenCalledWith('ocr:success', expect.objectContaining({ pageId: 'p1' }))
+  })
+
+  it('rejects queueing with load_error when the model failed to load', async () => {
+    mockHealthStore.isHealthy = false
+    mockHealthStore.isModelError = true
+    mockHealthStore.loadError = 'weights missing'
+    const service = serviceWith(vi.fn())
+    await expect(service.queueOCR('p1', new Blob(['x']))).rejects.toThrow('weights missing')
+  })
+
+  it('retries 503 model_loading using Retry-After', async () => {
+    const process = vi.fn()
+      .mockRejectedValueOnce(new ModelLoadingError('loading', { status: 503, code: 'model_loading', retryAfterMs: 2000 }))
+      .mockResolvedValueOnce(okResult)
+    const service = serviceWith(process)
+    await service.queueOCR('p1', new Blob(['x']))
+    const run = capturedTask!(new AbortController().signal)
+    await vi.advanceTimersByTimeAsync(2000)
+    await run
+    expect(process).toHaveBeenCalledTimes(2)
+    expect(ocrEvents.emit).not.toHaveBeenCalledWith('ocr:error', expect.anything())
+  })
+
+  it('parks a network error while hidden and retries when visible again', async () => {
+    setVisibility('hidden')
+    const process = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(okResult)
+    const service = serviceWith(process)
+    await service.queueOCR('p1', new Blob(['x']))
+    const run = capturedTask!(new AbortController().signal)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(process).toHaveBeenCalledTimes(1) // still parked, no error emitted
+    expect(ocrEvents.emit).not.toHaveBeenCalledWith('ocr:error', expect.anything())
+
+    setVisibility('visible')
+    service.notifyVisible()
+    await run
+    expect(process).toHaveBeenCalledTimes(2)
+    expect(ocrEvents.emit).toHaveBeenCalledWith('ocr:success', expect.objectContaining({ pageId: 'p1' }))
+  })
+
+  it('gives up after 3 network retries while visible and reports the error', async () => {
+    const process = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    const service = serviceWith(process)
+    await service.queueOCR('p1', new Blob(['x']))
+    const run = capturedTask!(new AbortController().signal).catch(e => e)
+    await vi.advanceTimersByTimeAsync(20_000)
+    const err = await run
+    expect(err).toBeInstanceOf(TypeError)
+    expect(process).toHaveBeenCalledTimes(4)
+    expect(ocrEvents.emit).toHaveBeenCalledWith('ocr:error', expect.objectContaining({ pageId: 'p1' }))
+  })
+
+  it('resumeOnVisible re-queues orphaned pages only, refreshes health, reports missing images', async () => {
+    const service = serviceWith(vi.fn().mockResolvedValue(okResult))
+    vi.mocked(db.getPageImage).mockImplementation(async (id: string) => (id === 'gone' ? undefined : new Blob(['x'])))
+
+    await service.queueOCR('busy', new Blob(['x'])) // in flight: must not be restarted
+    vi.mocked(queueManager.addOCRTask).mockClear()
+
+    const stats = await service.resumeOnVisible([
+      { id: 'busy', status: 'recognizing' },
+      { id: 'orphan', status: 'pending_ocr' },
+      { id: 'gone', status: 'recognizing' },
+      { id: 'done', status: 'completed' }
+    ])
+
+    expect(mockHealthStore.checkNow).toHaveBeenCalled()
+    expect(stats).toEqual({ resumed: 1, skipped: 2, missingImage: 1 })
+    expect(queueManager.addOCRTask).toHaveBeenCalledTimes(1)
+    expect(queueManager.addOCRTask).toHaveBeenCalledWith('orphan', expect.any(Function))
+    expect(ocrEvents.emit).toHaveBeenCalledWith('ocr:error', expect.objectContaining({ pageId: 'gone' }))
+  })
+
+  it('clears in-flight tracking when the task finishes', async () => {
+    const service = serviceWith(vi.fn().mockResolvedValue(okResult))
+    await service.queueOCR('p1', new Blob(['x']))
+    expect(service.isInFlight('p1')).toBe(true)
+    await capturedTask!(new AbortController().signal)
+    expect(service.isInFlight('p1')).toBe(false)
   })
 })
