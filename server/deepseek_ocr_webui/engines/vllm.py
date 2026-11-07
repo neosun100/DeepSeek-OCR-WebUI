@@ -143,6 +143,10 @@ class VLLMEngine(Engine):
         # 仍是 V1 接口（2026-11-07 A10G：vLLM 0.33 报 "not a subclass of vllm.v1.worker.gpu…LogitsProcessor"）
         # ⇒ 默认走 legacy V1 runner。用户显式设了就尊重用户的值。
         env.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+        # vLLM 0.33 镜像自带的 Triton 编译 OCR-2 视觉注意力 kernel 时报
+        # "NameError: Cannot access global variable LOG2E from within @jit'ed function"（与 runner 无关，V1/V2 都挂；
+        # 2026-11-07 A10G 三轮单变量对照定位）。Triton 报错里给出的官方开关 ⇒ 加上后 E2E 10/10、并发 16 132 页/分。
+        env.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
         # 命令行全部来自部署配置（Settings），不含任何请求数据
         self._proc = subprocess.Popen(  # noqa: S603
             cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env, start_new_session=True
