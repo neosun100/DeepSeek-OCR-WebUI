@@ -1,0 +1,68 @@
+# GitLab CI —— 日常门禁（Linux）。GitHub Actions 同样在 PR / push 上跑（公开仓库，ubuntu runner 免费）。
+# 极速 CI：所有作业 2xlarge + amd64（gitlab-push ci-yaml.md 5.6）；pytest 用 xdist 并行（本地 -n 8 连跑 3 次稳定）。
+# GPU 相关判据（真实权重推理、Docker 镜像端到端）不在这里：见 scripts/gpu-verify/（需要 NVIDIA GPU）。
+
+default:
+  tags: ["size:2xlarge", "arch:amd64"]
+  interruptible: true
+
+stages: [check]
+
+variables:
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
+  npm_config_cache: "$CI_PROJECT_DIR/.npm"
+
+backend:
+  stage: check
+  image: ghcr.io/astral-sh/uv:0.9-python3.12-bookworm-slim
+  cache:
+    key: uv-$CI_COMMIT_REF_SLUG
+    paths: [.uv-cache]
+  script:
+    - uv sync --frozen --extra mcp --group dev
+    - uv run ruff check server tests scripts
+    - uv run ruff format --check server tests scripts
+    - uv run pytest -q -n auto tests/unit tests/regression --junitxml=pytest.xml
+    - uv run pytest -q tests/e2e -rs
+  artifacts:
+    when: always
+    reports:
+      junit: pytest.xml
+
+frontend:
+  stage: check
+  image: node:22-bookworm
+  cache:
+    key: npm-$CI_COMMIT_REF_SLUG
+    paths: [.npm]
+  script:
+    - cd frontend
+    - npm ci --no-audit --no-fund
+    - npx eslint .
+    - npx vue-tsc -b
+    - |
+      npx vitest run --reporter=default --reporter=junit --outputFile.junit=vitest.xml
+    - npm run build
+    - npm audit --omit=dev --audit-level=high
+  artifacts:
+    when: always
+    reports:
+      junit: frontend/vitest.xml
+
+e2e:
+  stage: check
+  image: mcr.microsoft.com/playwright:v1.57.0-jammy  # 与 package-lock 的 @playwright/test 同版本（浏览器二进制才对得上）
+  cache:
+    key: npm-$CI_COMMIT_REF_SLUG
+    paths: [.npm]
+    policy: pull
+  script:
+    - cd frontend
+    - npm ci --no-audit --no-fund
+    - |
+      PLAYWRIGHT_JUNIT_OUTPUT_NAME=e2e.xml npx playwright test --project=chromium --reporter=line,junit
+  artifacts:
+    when: always
+    reports:
+      junit: frontend/e2e.xml
+    paths: [frontend/playwright-report]
