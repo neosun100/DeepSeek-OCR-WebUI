@@ -1,4 +1,4 @@
-# DeepSeek-OCR-WebUI v5.0 — 翻新 Roadmap
+# DeepSeek-OCR-WebUI v5.0 — 翻新 Roadmap（✅ 2026-11-07 已发布 v5.0.0）
 
 > 现行规程（替换式）。研究证据：`docs/research/issues-triage.md`（18 条 issue 定根因）、
 > `docs/research/aws-gpu-ocr-lessons.md`（aws-gpu Unlimited-OCR 服务化经验）。
@@ -29,8 +29,8 @@
 |---|---|---|
 | Mac MPS 跑不通 OCR-2 ⇒ 砍 Mac 支持 | M5 Max 探针 + `test_real_model` 5/5 + bench | ✅ 未否决：8.1 页/分，已知文字召回 1.00 |
 | 老卡（sm<80）跑不通 ⇒ 文档写「需 Ampere+」 | T4 原生 `verify-native.sh` | ✅ 未否决：NATIVE_PASS，fp16 + eager，7.8 页/分 |
-| vLLM 与 HF 产物不一致（双向召回均值 < 0.9）⇒ vLLM 只作可选 | A10G `verify-docker.sh` P6 | 见 §8 实测（vLLM 0.33 需 legacy V1 runner 才能挂 NGram processor） |
-| vLLM 吞吐提升 < 2×（并发 8）⇒ 砍掉 vLLM 目标 | A10G bench | 见 §8 实测 |
+| vLLM 与 HF 产物不一致（双向召回均值 < 0.9）⇒ vLLM 只作可选 | A10G `verify-docker.sh` P6 | ✅ 未否决：均值 0.985、最低 0.849（`DOCKER_PASS`）；vLLM 0.33 需 legacy V1 runner + `TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1` |
+| vLLM 吞吐提升 < 2×（并发 8）⇒ 砍掉 vLLM 目标 | A10G bench | ✅ 未否决：并发 8 为 113.7 页/分 vs transformers 9.5（12×）；详见 docs/BENCHMARKS.md |
 | find 模式（模型级 Locate）不可用 ⇒ 改服务端块级 | 2 图 × 3 词 × 2 写法 = 12 次 | 🔴 **否决模型级 find**（12/12 退回文档解析，上游 README 无 Locate 提示词）⇒ 改为块级搜索 |
 
 ## 2. 目标架构
