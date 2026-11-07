@@ -52,7 +52,8 @@ def test_subprocess_env_defaults_legacy_runner(monkeypatch: pytest.MonkeyPatch, 
     e.log_dir = str(tmp_path)
     asyncio.run(e._start_subprocess(with_processor=True))
     assert captured["VLLM_USE_V2_MODEL_RUNNER"] == "0"
-    assert captured["TRITON_ALLOW_NON_CONSTEXPR_GLOBALS"] == "1"  # vLLM 0.33 + OCR-2 视觉 kernel 的 LOG2E 编译错误
+    # vLLM 0.33 + OCR-2 视觉 kernel 的 LOG2E 编译错误
+    assert captured["TRITON_ALLOW_NON_CONSTEXPR_GLOBALS"] == "1"
 
 
 def test_user_runner_choice_respected(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
