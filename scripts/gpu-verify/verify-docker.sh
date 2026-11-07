@@ -24,6 +24,16 @@ mkdir -p "$RES" "$MODELS"
 LOG="$RES/verify-docker.log"
 exec > >(tee -a "$LOG") 2>&1
 FAILS=()
+# 只跑部分目标：TARGETS="vllm"（默认两个都跑）
+read -ra TARGET_LIST <<< "${TARGETS:-hf vllm}"
+# 结果回传：每个阶段后把 results/ 打包 PUT 到预签名 URL —— 实例被兜底终止也不丢结果
+# （2026-11-07 教训：4 h 自毁把远端结果文件一起带走了，只剩轮询快照）
+upload() {
+  if [ -n "${RESULTS_PUT_URL:-}" ]; then
+    tar -czf - -C "$WORK" results | curl -fsS -X PUT -T - "$RESULTS_PUT_URL" >/dev/null && note "results uploaded"
+  fi
+  return 0
+}
 note() { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { FAILS+=("$1"); note "❌ $1 ${2:-}"; }
 
@@ -43,7 +53,7 @@ command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh >/
 uv sync -q --frozen --group dev || { echo "VERDICT_AT_END: DOCKER_BLOCKED:uv_sync"; exit 2; }
 
 # ---------------------------------------------------------------- P1 build
-for target in hf vllm; do
+for target in "${TARGET_LIST[@]}"; do
   note "build $target"
   t0=$(date +%s)
   if docker build --progress=plain --target "$target" -t "dsocr:$target" . > "$RES/build-$target.log" 2>&1; then
@@ -90,7 +100,7 @@ run_engine() {
   uv run python scripts/bench.py --base http://127.0.0.1:8001 --concurrency "$levels" --rounds 2 --out "$RES/bench-$target.json" \
     > "$RES/bench-$target.log" 2>&1 || fail "P5_bench_$target"
   cat "$RES/bench-$target.log"
-  uv run python - "$RES/bench-$target.json" <<'PY' || fail "P5_quality_$1"
+  uv run python - "$RES/bench-$target.json" <<'PY' || fail "P5_quality_$target"
 import json, sys
 d = json.load(open(sys.argv[1]))
 lv = d["levels"][0]
@@ -102,10 +112,10 @@ PY
   sort -n "$RES/vram-$target.trace" | tail -1 | xargs -I{} echo "{\"target\":\"$target\",\"vram_used_peak_mib\":{}}" | tee "$RES/vram-$target.json"
   docker logs "$name" > "$RES/server-$target.log" 2>&1
   docker rm -f "$name" >/dev/null
+  upload
 }
 
-run_engine hf
-run_engine vllm
+for t in "${TARGET_LIST[@]}"; do run_engine "$t"; done
 
 # ---------------------------------------------------------------- P6 cross-engine agreement
 if [ -f "$RES/bench-hf.json" ] && [ -f "$RES/bench-vllm.json" ]; then
@@ -113,4 +123,7 @@ if [ -f "$RES/bench-hf.json" ] && [ -f "$RES/bench-vllm.json" ]; then
   uv run python -c "import json,sys; d=json.load(open('$RES/compare.json')); sys.exit(0 if (d['mean_agreement'] or 0)>=0.9 else 1)" || fail "P6_agreement"
 fi
 
-if [ ${#FAILS[@]} -eq 0 ]; then echo "VERDICT_AT_END: DOCKER_PASS"; else echo "VERDICT_AT_END: DOCKER_FAIL:$(IFS=,; echo "${FAILS[*]}")"; fi
+if [ ${#FAILS[@]} -eq 0 ]; then VERDICT="DOCKER_PASS"; else VERDICT="DOCKER_FAIL:$(IFS=,; echo "${FAILS[*]}")"; fi
+echo "$VERDICT" > "$RES/verdict.txt"
+upload
+echo "VERDICT_AT_END: $VERDICT"   # 必须是最后一行：轮询读末行判定

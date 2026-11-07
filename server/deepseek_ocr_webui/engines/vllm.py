@@ -78,9 +78,11 @@ class VLLMEngine(Engine):
         self._client: httpx.AsyncClient | None = None
         self._served_model: str = SERVED_NAME
         self._version: str | None = None
+        self.notes: list[str] = []
+        self.ngram_processor: bool | None = None  # None = 外部 vLLM，未知
 
     # ------------------------------------------------------------------ load
-    def _command(self) -> list[str]:
+    def _command(self, *, with_processor: bool = True) -> list[str]:
         cmd = [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", self.model_path or self.model_id,
@@ -88,13 +90,17 @@ class VLLMEngine(Engine):
             "--host", "127.0.0.1",  # 子进程只绑本机：对外只有本服务这一个入口
             "--port", str(self.port),
             "--trust-remote-code",
-            "--logits-processors", LOGITS_PROCESSOR,
             "--no-enable-prefix-caching",
             "--mm-processor-cache-gb", "0",
             "--gpu-memory-utilization", str(self.gpu_memory_utilization),
             "--max-model-len", str(MANAGED_MAX_MODEL_LEN),
             "--max-num-seqs", str(self.max_concurrency),
         ]  # fmt: skip
+        if with_processor:
+            cmd += ["--logits-processors", LOGITS_PROCESSOR]
+            self.ngram_processor = True
+        else:
+            self.ngram_processor = False
         if self.revision and not self.model_path:
             cmd += ["--revision", self.revision, "--tokenizer-revision", self.revision]
         cmd += shlex.split(self.extra_args)
@@ -102,18 +108,40 @@ class VLLMEngine(Engine):
 
     async def load(self) -> None:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_s, connect=10.0))
-        if self.managed:
-            await self._start_subprocess()
-        await self._wait_ready()
+        if not self.managed:
+            await self._wait_ready()
+            await self._discover_model()
+            return
+        await self._start_subprocess(with_processor=True)
+        try:
+            await self._wait_ready()
+        except EngineUnavailable as e:
+            if "LogitsProcessor" not in str(e):
+                raise
+            # vLLM 改了 logits processor 接口而 legacy runner 开关也失效时：不挂 processor 起服务，并留痕。
+            # 复读仍由本引擎的流式检测截断兜底（第二道防线），但这不是「检查通过」，health 里明说。
+            self.notes.append(
+                "防复读 NGramPerReqLogitsProcessor 无法加载（vLLM 接口不兼容）；仅靠服务端流式复读截断"
+            )
+            logger.warning(
+                "NGram processor 不兼容，改为不挂 processor 启动：{}", str(e).splitlines()[0][:200]
+            )
+            await self._stop_subprocess()
+            await self._start_subprocess(with_processor=False)
+            await self._wait_ready()
         await self._discover_model()
 
-    async def _start_subprocess(self) -> None:
-        cmd = self._command()
+    async def _start_subprocess(self, *, with_processor: bool) -> None:
+        cmd = self._command(with_processor=with_processor)
         log_path = Path(self.log_dir or tempfile.gettempdir()) / "vllm-server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info("启动 vLLM 子进程（日志 {}）：{}", log_path, " ".join(cmd))
         log_f = open(log_path, "ab")  # noqa: SIM115 —— 文件句柄随子进程生命周期，由 close() 关闭
         env = dict(os.environ)
+        # vLLM ≥0.2x 默认 V2 model runner，要求 logits processor 继承新基类；上游 NGramPerReqLogitsProcessor
+        # 仍是 V1 接口（2026-11-07 A10G：vLLM 0.33 报 "not a subclass of vllm.v1.worker.gpu…LogitsProcessor"）
+        # ⇒ 默认走 legacy V1 runner。用户显式设了就尊重用户的值。
+        env.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
         # 命令行全部来自部署配置（Settings），不含任何请求数据
         self._proc = subprocess.Popen(  # noqa: S603
             cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env, start_new_session=True
@@ -191,8 +219,9 @@ class VLLMEngine(Engine):
             "stream": True,
             "stream_options": {"include_usage": True},
             "skip_special_tokens": False,  # 保留 <|ref|>/<|det|> grounding 标记
-            "vllm_xargs": NGRAM_ARGS,
         }
+        if self.ngram_processor is not False:  # 没挂 processor 时传 vllm_xargs 会被 vLLM 拒绝
+            body["vllm_xargs"] = NGRAM_ARGS
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         return body
@@ -277,6 +306,14 @@ class VLLMEngine(Engine):
             {"generate_s": round(time.monotonic() - t0, 3), "backend": url},
         )
 
+    async def _stop_subprocess(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
@@ -295,6 +332,8 @@ class VLLMEngine(Engine):
             "dtype": "bfloat16",
             "vllm": self._version,
             "managed": self.managed,
+            "ngram_processor": self.ngram_processor,
+            "notes": list(self.notes),
             "backends": [{"url": u, "inflight": self._inflight[u]} for u in self.urls],
         }
 
